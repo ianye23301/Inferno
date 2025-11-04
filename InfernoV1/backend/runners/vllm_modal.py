@@ -29,23 +29,23 @@ image = (
 )
 
 
-@app.function(image=image, gpu="A100", timeout=60*30)
+@app.function(image=image, gpu="A100", timeout=60*30, secrets=[modal.Secret.from_name("huggingface")])
 def bench_a100(args):
     return _bench_impl(args)
 
-@app.function(image=image, gpu="H100", timeout=60*30)
+@app.function(image=image, gpu="H100", timeout=60*30, secrets=[modal.Secret.from_name("huggingface")])
 def bench_h100(args):
     return _bench_impl(args)
 
-@app.function(image=image, gpu="H200", timeout=60*30)
+@app.function(image=image, gpu="H200", timeout=60*30, secrets=[modal.Secret.from_name("huggingface")])
 def bench_h200(args):
     return _bench_impl(args)
 
-@app.function(image=image, gpu="B200", timeout=60*30)
+@app.function(image=image, gpu="B200", timeout=60*30, secrets=[modal.Secret.from_name("huggingface")])
 def bench_b200(args):
     return _bench_impl(args)
 
-@app.function(image=image, gpu="H100")
+@app.function(image=image, gpu="H100", secrets=[modal.Secret.from_name("huggingface")])
 def env_check():
     import os, torch, numpy, transformers, vllm
     print("PYTHONNOUSERSITE=", os.environ.get("PYTHONNOUSERSITE"))
@@ -55,6 +55,11 @@ def env_check():
     print("transformers", transformers.__version__)
     print("vllm", vllm.__version__)
 
+
+@app.function(image=image, secrets=[modal.Secret.from_name("huggingface")])
+def env_check():
+    from huggingface_hub import whoami
+    print("HF whoami:", whoami())
 
 def _coerce_args(args):
     """Accept dict or JSON string from CLI and return a dict."""
