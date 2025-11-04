@@ -27,27 +27,28 @@ image = (
         "TF_CPP_MIN_LOG_LEVEL": "3",
         "PYTHONNOUSERSITE": "1",           # ignore user site-packages
     })
-    .add_secret(modal.Secret.from_name("hf-token"))
 )
 
 
-@app.function(image=image, gpu="A100", timeout=60*30, secrets=[modal.Secret.from_name("huggingface")])
+HF_SECRET = modal.Secret.from_name("hf-token")
+
+@app.function(image=image, gpu="A100", timeout=60*30, secrets=[HF_SECRET])
 def bench_a100(args):
     return _bench_impl(args)
 
-@app.function(image=image, gpu="H100", timeout=60*30, secrets=[modal.Secret.from_name("huggingface")])
+@app.function(image=image, gpu="H100", timeout=60*30, secrets=[HF_SECRET])
 def bench_h100(args):
     return _bench_impl(args)
 
-@app.function(image=image, gpu="H200", timeout=60*30, secrets=[modal.Secret.from_name("huggingface")])
+@app.function(image=image, gpu="H200", timeout=60*30, secrets=[HF_SECRET])
 def bench_h200(args):
     return _bench_impl(args)
 
-@app.function(image=image, gpu="B200", timeout=60*30, secrets=[modal.Secret.from_name("huggingface")])
+@app.function(image=image, gpu="B200", timeout=60*30, secrets=[HF_SECRET])
 def bench_b200(args):
     return _bench_impl(args)
 
-@app.function(image=image, gpu="H100", secrets=[modal.Secret.from_name("huggingface")])
+@app.function(image=image, gpu="H100", secrets=[HF_SECRET])
 def env_check():
     import os, torch, numpy, transformers, vllm
     from huggingface_hub import whoami, login
