@@ -5,6 +5,7 @@ import time, json
 from datetime import datetime
 import modal
 
+
 app = modal.App("inferno-vllm-bench-mock")
 # Make sure these are set BEFORE importing vllm/transformers.
 
@@ -26,6 +27,7 @@ image = (
         "TF_CPP_MIN_LOG_LEVEL": "3",
         "PYTHONNOUSERSITE": "1",           # ignore user site-packages
     })
+    .add_secret(modal.Secret.from_name("hf-token"))
 )
 
 
@@ -48,8 +50,16 @@ def bench_b200(args):
 @app.function(image=image, gpu="H100", secrets=[modal.Secret.from_name("huggingface")])
 def env_check():
     import os, torch, numpy, transformers, vllm
-    from huggingface_hub import whoami
-    print("HF whoami:", whoami())
+    from huggingface_hub import whoami, login
+
+    print("HUGGINGFACE_HUB_TOKEN in env:", "HUGGINGFACE_HUB_TOKEN" in os.environ)
+    token = os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    if not token:
+        raise RuntimeError("No HUGGINGFACE_HUB_TOKEN in environment.")
+
+    # optional but nice: establish an auth cache for the process
+    login(token=token, add_to_git_credential=False)
+    print("HF whoami:", whoami())  # no args needed after login
     print("PYTHONNOUSERSITE=", os.environ.get("PYTHONNOUSERSITE"))
     print("TRANSFORMERS_NO_TF=", os.environ.get("TRANSFORMERS_NO_TF"))
     print("torch", torch.__version__)
