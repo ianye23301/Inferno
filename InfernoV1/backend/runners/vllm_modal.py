@@ -83,21 +83,22 @@ def env_check():
     # Verify token + model access (adjust model if you use a different one)
     _check_hf_access("meta-llama/Llama-3.1-8B-Instruct")
 
-@app.function(image=image, gpu="A100", timeout=60*30, secrets=[HF_SECRET])
-def bench_a100(args):
-    return _bench_impl(args)
 
 @app.function(image=image, gpu="H100", timeout=60*30, secrets=[HF_SECRET])
-def bench_h100(args):
-    return _bench_impl(args)
+def bench_h100(**payload):
+    return _bench_impl(payload)
+
+@app.function(image=image, gpu="A100", timeout=60*30, secrets=[HF_SECRET])
+def bench_a100(**payload):
+    return _bench_impl(payload)
 
 @app.function(image=image, gpu="H200", timeout=60*30, secrets=[HF_SECRET])
-def bench_h200(args):
-    return _bench_impl(args)
+def bench_h200(**payload):
+    return _bench_impl(payload)
 
 @app.function(image=image, gpu="B200", timeout=60*30, secrets=[HF_SECRET])
-def bench_b200(args):
-    return _bench_impl(args)
+def bench_b200(**payload):
+    return _bench_impl(payload)
     
 def _bench_impl(args):
     os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
