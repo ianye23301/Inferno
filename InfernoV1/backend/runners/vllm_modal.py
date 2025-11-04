@@ -1,39 +1,33 @@
 # backend/runners/vllm_modal.py
 
 from __future__ import annotations
-import time, json, os
+import time, json
 from datetime import datetime
 import modal
-from vllm import LLM, SamplingParams
 
 app = modal.App("inferno-vllm-bench-mock")
 # Make sure these are set BEFORE importing vllm/transformers.
-os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-os.environ.setdefault("PYTHONNOUSERSITE", "1")  # ignore user site packages
-
 
 image = (
     modal.Image.from_registry(
         "nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04",
         add_python="3.10",
     )
-    # Install numpy first, pinned <2 to avoid ABI breakage.
-    .pip_install("numpy==1.26.4")
-    # Then the rest, with a transformers version that plays nice.
+    .pip_install("numpy==1.26.4")          # install first to avoid upgrades to 2.x
     .pip_install(
-        "torch==2.3.0",         # required by vllm==0.5.0
+        "torch==2.3.0",                    # required by vllm==0.5.0
         "vllm==0.5.0",
-        "transformers==4.45.2", # avoids newer image/TF import churn
+        "transformers==4.45.2",
         "accelerate==1.11.0",
-        "pillow<11"             # (optional) avoid newest wheel surprises
+        "pillow<11",
     )
     .env({
-        "TRANSFORMERS_NO_TF": "1",
+        "TRANSFORMERS_NO_TF": "1",         # stop TF imports from transformers
         "TF_CPP_MIN_LOG_LEVEL": "3",
-        "PYTHONNOUSERSITE": "1",
+        "PYTHONNOUSERSITE": "1",           # ignore user site-packages
     })
 )
+
 
 @app.function(image=image, gpu="A100", timeout=60*30)
 def bench_a100(args):
@@ -67,6 +61,13 @@ def _coerce_args(args):
 
 
 def _bench_impl(args):
+    import os
+    os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
+    # ⬇️ Import vLLM only inside the worker process (remote GPU)
+    from vllm import LLM, SamplingParams
+
     args = _coerce_args(args)
 
     model_name = args.get("model", "meta-llama/Meta-Llama-3-8B-Instruct")
