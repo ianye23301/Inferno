@@ -7,24 +7,31 @@ import modal
 from vllm import LLM, SamplingParams
 
 app = modal.App("inferno-vllm-bench-mock")
+# Make sure these are set BEFORE importing vllm/transformers.
+os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("PYTHONNOUSERSITE", "1")  # ignore user site packages
+
 
 image = (
     modal.Image.from_registry(
         "nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04",
         add_python="3.10",
     )
-    # IMPORTANT: pin numpy < 2 to avoid ABI mismatch
+    # Install numpy first, pinned <2 to avoid ABI breakage.
+    .pip_install("numpy==1.26.4")
+    # Then the rest, with a transformers version that plays nice.
     .pip_install(
-        "numpy<2.0",
-        "torch==2.3.0",        # matches vllm 0.5.0 requirements
+        "torch==2.3.0",         # required by vllm==0.5.0
         "vllm==0.5.0",
-        "transformers==4.45.2",  # safe, modern enough, avoids recent TF/image deps churn
-        "accelerate",
+        "transformers==4.45.2", # avoids newer image/TF import churn
+        "accelerate==1.11.0",
+        "pillow<11"             # (optional) avoid newest wheel surprises
     )
-    # Stop transformers from importing TensorFlow at all
     .env({
         "TRANSFORMERS_NO_TF": "1",
-        "TF_CPP_MIN_LOG_LEVEL": "3",  # quieter logs if TF ever gets near
+        "TF_CPP_MIN_LOG_LEVEL": "3",
+        "PYTHONNOUSERSITE": "1",
     })
 )
 
