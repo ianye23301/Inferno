@@ -46,7 +46,7 @@ class ModalDriver:
         cmd = [
             "modal", "run", "-m",
             f"backend.runners.vllm_modal::{fn}",
-            "--kwargs", json.dumps(payload),  # <-- use kwargs, not args
+            "--args", json.dumps([payload]),  # NOTE: wrap in a list!
         ]
 
         log_event("modal_cli_start", run_id=run_id, cmd=" ".join(cmd))

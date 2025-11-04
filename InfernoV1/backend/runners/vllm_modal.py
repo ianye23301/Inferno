@@ -57,14 +57,31 @@ def _check_hf_access(model_id: str):
     print(f"HF access OK: {model_id}")
 
 def _coerce_args(args):
+    # Accept dict directly
     if isinstance(args, dict):
         return args
+
+    # If Modal delivers a list, unwrap it
+    if isinstance(args, list):
+        if len(args) == 1 and isinstance(args[0], dict):
+            return args[0]
+        # Handle double-nested [[payload]]
+        if len(args) == 1 and isinstance(args[0], list) and len(args[0]) == 1 and isinstance(args[0][0], dict):
+            return args[0][0]
+        return {}
+
+    # If stringified JSON, parse and unwrap
     if isinstance(args, str):
         try:
-            return json.loads(args)
+            obj = json.loads(args)
+            if isinstance(obj, dict):
+                return obj
+            if isinstance(obj, list) and len(obj) == 1 and isinstance(obj[0], dict):
+                return obj[0]
         except Exception:
-            return {}
+            pass
     return {}
+
 
 @app.function(image=image, gpu="H100", timeout=60*30, secrets=[HF_SECRET])
 def env_check():
@@ -83,22 +100,21 @@ def env_check():
     # Verify token + model access (adjust model if you use a different one)
     _check_hf_access("meta-llama/Llama-3.1-8B-Instruct")
 
+@app.function(image=image, gpu="A100", timeout=60*30, secrets=[HF_SECRET])
+def bench_a100(args):
+    return _bench_impl(args)
 
 @app.function(image=image, gpu="H100", timeout=60*30, secrets=[HF_SECRET])
-def bench_h100(**payload):
-    return _bench_impl(payload)
-
-@app.function(image=image, gpu="A100", timeout=60*30, secrets=[HF_SECRET])
-def bench_a100(**payload):
-    return _bench_impl(payload)
+def bench_h100(args):
+    return _bench_impl(args)
 
 @app.function(image=image, gpu="H200", timeout=60*30, secrets=[HF_SECRET])
-def bench_h200(**payload):
-    return _bench_impl(payload)
+def bench_h200(args):
+    return _bench_impl(args)
 
 @app.function(image=image, gpu="B200", timeout=60*30, secrets=[HF_SECRET])
-def bench_b200(**payload):
-    return _bench_impl(payload)
+def bench_b200(args):
+    return _bench_impl(args)
     
 def _bench_impl(args):
     os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
