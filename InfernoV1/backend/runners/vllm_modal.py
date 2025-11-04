@@ -53,10 +53,10 @@ def env_check():
     import os, torch, numpy, transformers, vllm
     from huggingface_hub import whoami, login
 
-    print("HUGGINGFACE_HUB_TOKEN in env:", "HUGGINGFACE_HUB_TOKEN" in os.environ)
-    token = os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    print("HF_TOKEN in env:", "HF_TOKEN" in os.environ)
+    token = os.environ.get("HF_TOKEN")
     if not token:
-        raise RuntimeError("No HUGGINGFACE_HUB_TOKEN in environment.")
+        raise RuntimeError("HF_TOKEN")
 
     # optional but nice: establish an auth cache for the process
     login(token=token, add_to_git_credential=False)
@@ -94,7 +94,7 @@ def _bench_impl(args):
 
     args = _coerce_args(args)
 
-    model_name = args.get("model", "meta-llama/Meta-Llama-3-8B-Instruct")
+    model_name = args.get("model", "meta-llama/Llama-3.1-8B-Instruct")
     gpu = args.get("gpu_pool", "H100")
     cfg = args.get("config", {})
 
