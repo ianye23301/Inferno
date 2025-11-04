@@ -1,0 +1,27 @@
+{
+  "job_name": "llama8b-batch-sweep",
+  "model": "meta-llama/Meta-Llama-3-8B-Instruct",
+  "gpu_pool": "H100",
+  "engine": "vllm",
+  "dataset": null,
+  "base_env": {},
+  "sweep": {
+    "batch_size": [
+      1,
+      2,
+      4
+    ],
+    "tensor_parallel": [
+      1
+    ],
+    "quantization": [
+      "none",
+      "awq"
+    ],
+    "extra": {}
+  },
+  "strategy": "grid",
+  "random_trials": null,
+  "num_gpus": 1,
+  "timeout_s": 3600
+}

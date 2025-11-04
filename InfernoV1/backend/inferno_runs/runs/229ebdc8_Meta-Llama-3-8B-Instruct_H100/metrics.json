@@ -1,0 +1,13 @@
+{
+  "model": "meta-llama/Meta-Llama-3-8B-Instruct",
+  "gpu": "H100",
+  "config": {
+    "batch_size": 4,
+    "tensor_parallel": 1,
+    "quantization": "awq"
+  },
+  "throughput_tok_s": 2310.0,
+  "ttft_s": 0.65,
+  "accuracy": null,
+  "timestamp": "2025-11-04T07:09:35.252738Z"
+}

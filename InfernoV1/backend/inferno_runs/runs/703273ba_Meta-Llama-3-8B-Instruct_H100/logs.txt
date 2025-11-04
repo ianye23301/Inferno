@@ -1,0 +1,10 @@
+✓ Initialized. View run at https://modal.com/apps/herdora/main/ap-NQ2AF3B9NyRppc2hMFyL8U
+✓ Created objects.
+├── 🔨 Created mount PythonPackage:backend
+├── 🔨 Created function bench_h100.
+├── 🔨 Created function bench_h200.
+├── 🔨 Created function bench_b200.
+└── 🔨 Created function bench_a100.
+{"event": "metrics", "data": {"model": "meta-llama/Meta-Llama-3-8B-Instruct", "gpu": "H100", "config": {"batch_size": 4, "tensor_parallel": 1, "quantization": "none"}, "throughput_tok_s": 2220.0, "ttft_s": 0.65, "accuracy": null, "timestamp": "2025-11-04T07:09:27.276887Z"}}
+Stopping app - local entrypoint completed.
+✓ App completed. View run at https://modal.com/apps/herdora/main/ap-NQ2AF3B9NyRppc2hMFyL8U
