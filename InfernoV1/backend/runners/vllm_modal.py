@@ -14,9 +14,10 @@ image = (
         add_python="3.10",
     )
     .pip_install(
-        "torch==2.4.0",
+        # match vLLM 0.5.0 requirements
+        "torch==2.3.0",
         "vllm==0.5.0",
-        "transformers",
+        "transformers",     # 4.5x is fine
         "accelerate",
         "numpy"
     )
