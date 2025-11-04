@@ -122,6 +122,7 @@ def _bench_impl(args):
 
     from vllm import LLM, SamplingParams
     from transformers.utils.hub import cached_file
+    import json, pathlib  # <- unconditionally here, not inside an if
 
     args = _coerce_args(args)
     model_name = args.get("model", "meta-llama/Llama-3.1-8B-Instruct")
