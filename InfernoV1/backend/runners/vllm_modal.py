@@ -98,9 +98,8 @@ def bench_h200(args):
 @app.function(image=image, gpu="B200", timeout=60*30, secrets=[HF_SECRET])
 def bench_b200(args):
     return _bench_impl(args)
-
+    
 def _bench_impl(args):
-    # Keep TF disabled inside the worker process too.
     os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
@@ -109,47 +108,76 @@ def _bench_impl(args):
 
     args = _coerce_args(args)
     model_name = args.get("model", "meta-llama/Llama-3.1-8B-Instruct")
-    cfg = args.get("config", {})
+    cfg        = args.get("config", {})
+    run_env    = args.get("env", {}) or {}
+    dataset    = args.get("dataset")  # e.g., path or inline spec
+
+    # -- apply per-run env injection
+    for k, v in run_env.items():
+        os.environ[str(k)] = str(v)
+
     batch_size = int(cfg.get("batch_size", 1))
-    tp = int(cfg.get("tensor_parallel", 1))
-    quant = cfg.get("quantization", "none")
+    tp         = int(cfg.get("tensor_parallel", 1))
+    quant      = cfg.get("quantization", "none")
 
-    # Ensure token is in env before any download happens.
     tok = _get_hf_token()
-
-    # Optional: enable fp8 path
-    if quant == "fp8":
-        os.environ["VLLM_FP8_ENABLED"] = "1"
-
-    # Preflight: check we can fetch config.json using this process’ token.
     _ = cached_file(model_name, "config.json", token=tok)
-    print(f"Fetched {model_name}/config.json OK")
 
-    prompts = ["The quick brown fox jumps over the lazy dog."] * batch_size
+    prompts  = ["The quick brown fox jumps over the lazy dog."] * batch_size
     sampling = SamplingParams(temperature=0.8, max_tokens=64)
 
-    # --- TTFT (load + first token init)
-    t0 = time.time()
-    llm = LLM(
+    # Build LLM kwargs with optional quantization
+    llm_kwargs = dict(
         model=model_name,
         tensor_parallel_size=tp,
         download_dir=os.environ.get("HF_HOME", "/root/.cache/huggingface"),
         trust_remote_code=False,
     )
+    if quant and quant != "none":
+        # vLLM supports quantization config by name for compatible checkpoints.
+        # If not supported for the chosen model, this will raise (surface in logs).
+        llm_kwargs["quantization"] = quant
+
+    t0  = time.time()
+    llm = LLM(**llm_kwargs)
     ttft = time.time() - t0
 
-    # --- Throughput
     t1 = time.time()
     outputs = llm.generate(prompts, sampling)
     gen_time = time.time() - t1
     total_tokens = sum(len(o.outputs[0].token_ids) for o in outputs)
     throughput = total_tokens / gen_time if gen_time > 0 else 0.0
 
+    # --- Minimal opt-in accuracy harness (substring EM)
+    # Accept either:
+    #  - dataset = [{"prompt": "...", "answer_substr": "..."}]
+    #  - dataset = path to a JSONL with those fields
+    accuracy = None
+    if dataset:
+        import json, pathlib
+        def _load_ds(ds):
+            if isinstance(ds, list): return ds
+            p = pathlib.Path(str(ds))
+            if p.exists():
+                return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+            return []
+        eval_recs = _load_ds(dataset)[:32]  # small, fast sanity-check eval
+        if eval_recs:
+            eval_prompts = [r["prompt"] for r in eval_recs]
+            eval_outs = llm.generate(eval_prompts, SamplingParams(temperature=0.0, max_tokens=64))
+            hits = 0
+            for r, out in zip(eval_recs, eval_outs):
+                text = out.outputs[0].text
+                if r.get("answer_substr") and r["answer_substr"].lower() in text.lower():
+                    hits += 1
+            accuracy = hits / len(eval_recs)
+
     metrics = {
         "model": model_name,
         "config": cfg,
         "throughput_tok_s": throughput,
         "ttft_s": ttft,
+        "accuracy": accuracy,
         "timestamp": datetime.utcnow().isoformat() + "Z",
     }
     print(json.dumps({"event": "metrics", "data": metrics}))

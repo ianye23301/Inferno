@@ -4,38 +4,46 @@ from settings import ACTIVE_LIMIT, SCHEDULER_POLL_SECONDS
 import registry
 from modal_driver import ModalDriver
 from logger import log_event
-
+from pathlib import Path
 
 _driver = ModalDriver()
 _stop_flag = False
 
-
+RESULTS_DIR = Path("./inferno_runs").resolve()
+RUNS_DIR = RESULTS_DIR / "runs"
 
 
 def _run_once_for_pool(pool: str) -> None:
-# Backpressure
     if registry.count_active_for_pool(pool) >= ACTIVE_LIMIT.get(pool, 1):
         return
-    # print(f"Running once for pool: {pool}")
     run_id = registry.next_scheduled_for_pool(pool)
     if not run_id:
         return
+
     print(f"Transitioning to PROVISIONING for run: {run_id}")
     registry.transition(run_id, "PROVISIONING")
     log_event("provisioning_started", run_id=run_id, pool=pool)
+
+    # Launch (MVP CLI bookkeeping)
+    spec, cfg = registry.get_spec_and_config(run_id)  # add this if missing
     modal_id = _driver.launch({"run_id": run_id})
     registry.attach_modal_id(run_id, modal_id)
     registry.transition(run_id, "RUNNING")
-    # For MVP stub, execute locally and collect immediately
-    row = registry.get_run(run_id)
-    spec = json.loads(row["spec_json"]) if row else {}
-    config = json.loads(row["config_json"]) if row else {}
-    metrics_path = _driver.execute_locally_and_collect(run_id, spec, config)
-    registry.transition(run_id, "COLLECTING")
-    registry.save_metrics_path(run_id, metrics_path)
-    registry.transition(run_id, "COMPLETED")
-    log_event("run_completed", run_id=run_id, metrics_path=metrics_path)
 
+    # Execute and collect synchronously (MVP)
+    try:
+        metrics_path = _driver.execute_locally_and_collect(run_id, spec, cfg)
+        # record artifact paths for UI
+        folder = RUNS_DIR / run_id
+        registry.set_paths(run_id, {
+            "metrics": str(metrics_path),
+            "logs": str(folder / "logs.txt"),
+            "state": str(folder / "state.json"),
+        })
+        registry.transition(run_id, "COMPLETED")
+    except Exception as e:
+        log_event("run_failed", run_id=run_id, error=str(e))
+        registry.transition(run_id, "FAILED")
 
 
 
