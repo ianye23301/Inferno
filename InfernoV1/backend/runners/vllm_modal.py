@@ -13,14 +13,19 @@ image = (
         "nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04",
         add_python="3.10",
     )
+    # IMPORTANT: pin numpy < 2 to avoid ABI mismatch
     .pip_install(
-        # match vLLM 0.5.0 requirements
-        "torch==2.3.0",
+        "numpy<2.0",
+        "torch==2.3.0",        # matches vllm 0.5.0 requirements
         "vllm==0.5.0",
-        "transformers",     # 4.5x is fine
+        "transformers==4.45.2",  # safe, modern enough, avoids recent TF/image deps churn
         "accelerate",
-        "numpy"
     )
+    # Stop transformers from importing TensorFlow at all
+    .env({
+        "TRANSFORMERS_NO_TF": "1",
+        "TF_CPP_MIN_LOG_LEVEL": "3",  # quieter logs if TF ever gets near
+    })
 )
 
 @app.function(image=image, gpu="A100", timeout=60*30)
