@@ -48,6 +48,8 @@ def bench_b200(args):
 @app.function(image=image, gpu="H100", secrets=[modal.Secret.from_name("huggingface")])
 def env_check():
     import os, torch, numpy, transformers, vllm
+    from huggingface_hub import whoami
+    print("HF whoami:", whoami())
     print("PYTHONNOUSERSITE=", os.environ.get("PYTHONNOUSERSITE"))
     print("TRANSFORMERS_NO_TF=", os.environ.get("TRANSFORMERS_NO_TF"))
     print("torch", torch.__version__)
@@ -56,10 +58,6 @@ def env_check():
     print("vllm", vllm.__version__)
 
 
-@app.function(image=image, secrets=[modal.Secret.from_name("huggingface")])
-def env_check():
-    from huggingface_hub import whoami
-    print("HF whoami:", whoami())
 
 def _coerce_args(args):
     """Accept dict or JSON string from CLI and return a dict."""
