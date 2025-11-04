@@ -45,6 +45,16 @@ def bench_h200(args):
 def bench_b200(args):
     return _bench_impl(args)
 
+@app.function(image=image, gpu="H100")
+def env_check():
+    import os, torch, numpy, transformers, vllm
+    print("PYTHONNOUSERSITE=", os.environ.get("PYTHONNOUSERSITE"))
+    print("TRANSFORMERS_NO_TF=", os.environ.get("TRANSFORMERS_NO_TF"))
+    print("torch", torch.__version__)
+    print("numpy", numpy.__version__)
+    print("transformers", transformers.__version__)
+    print("vllm", vllm.__version__)
+
 
 def _coerce_args(args):
     """Accept dict or JSON string from CLI and return a dict."""
