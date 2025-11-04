@@ -144,3 +144,38 @@ def count_active_for_pool(gpu_pool: str) -> int:
 
 def set_scheduled(run_id: str) -> None:
     transition(run_id, "SCHEDULED")
+
+
+# --- add at bottom of registry.py ---
+
+def get_spec_and_config(run_id: str) -> tuple[JobSpec, Dict[str, Any]]:
+    """Return (spec: JobSpec, config: dict) for a run."""
+    with _conn() as c:
+        cur = c.execute("SELECT spec_json, config_json FROM runs WHERE run_id=?", (run_id,))
+        row = cur.fetchone()
+        if not row:
+            raise KeyError(f"run not found: {run_id}")
+        spec_json, cfg_json = row
+    # Prefer DB copies; fall back to files if you want:
+    # folder = _run_folder(run_id)
+    # if not spec_json: spec_json = (folder/"spec.json").read_text()
+    # if not cfg_json:  cfg_json  = (folder/"config.json").read_text()
+    spec = JobSpec.model_validate_json(spec_json)
+    cfg  = json.loads(cfg_json) if isinstance(cfg_json, str) else cfg_json
+    return spec, cfg
+
+
+def set_paths(run_id: str, paths: Dict[str, str]) -> None:
+    """
+    Update artifact path fields for a run (metrics/logs). Safe to call multiple times.
+    Accepts keys: 'metrics', 'logs'. Ignores unknown keys.
+    """
+    metrics = paths.get("metrics")
+    logs    = paths.get("logs")
+    with _conn() as c, _LOCK:
+        if metrics and logs:
+            c.execute("UPDATE runs SET metrics_path=?, logs_path=? WHERE run_id=?", (metrics, logs, run_id))
+        elif metrics:
+            c.execute("UPDATE runs SET metrics_path=? WHERE run_id=?", (metrics, run_id))
+        elif logs:
+            c.execute("UPDATE runs SET logs_path=? WHERE run_id=?", (logs, run_id))

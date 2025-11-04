@@ -32,7 +32,7 @@ def _run_once_for_pool(pool: str) -> None:
 
     # Execute and collect synchronously (MVP)
     try:
-        metrics_path = _driver.execute_locally_and_collect(run_id, spec, cfg)
+        metrics_path = _driver.execute_locally_and_collect(run_id, spec.model_dump(), cfg)
         # record artifact paths for UI
         folder = RUNS_DIR / run_id
         registry.set_paths(run_id, {
@@ -44,7 +44,7 @@ def _run_once_for_pool(pool: str) -> None:
     except Exception as e:
         log_event("run_failed", run_id=run_id, error=str(e))
         registry.transition(run_id, "FAILED")
-
+        
 
 
 def scheduler_loop():
