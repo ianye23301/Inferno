@@ -14,14 +14,16 @@ image = (
         "nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04",
         add_python="3.10",
     )
-    .pip_install("numpy==1.26.4")
+    .pip_install("numpy==1.26.4")  # keep <2 to dodge ABI drama
     .pip_install(
-        "torch==2.4.1",          # cu121 wheel available
-        "vllm==0.6.2",           # Llama-3.1 rope handled
+        # ✅ Match vLLM 0.6.2’s exact requirement:
+        "torch==2.4.0",               # cu121 wheel
+        "vllm==0.6.2",
         "transformers==4.45.2",
         "accelerate==1.11.0",
         "pillow<11",
         "huggingface_hub>=0.24.0",
+        "ray==2.51.1",
     )
     .env({
         "TRANSFORMERS_NO_TF": "1",
@@ -29,6 +31,7 @@ image = (
         "PYTHONNOUSERSITE": "1",
     })
 )
+
 HF_SECRET = modal.Secret.from_name(HF_SECRET_NAME)
 
 def _get_hf_token() -> str:
