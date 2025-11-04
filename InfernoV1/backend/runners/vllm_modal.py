@@ -51,7 +51,7 @@ def bench_b200(args):
 @app.function(image=image, gpu="H100", secrets=[HF_SECRET])
 def env_check():
     import os, torch, numpy, transformers, vllm
-    from huggingface_hub import whoami, login
+    from huggingface_hub import whoami, login, model_info
 
     print("HF_TOKEN in env:", "HF_TOKEN" in os.environ)
     token = os.environ.get("HF_TOKEN")
@@ -67,6 +67,8 @@ def env_check():
     print("numpy", numpy.__version__)
     print("transformers", transformers.__version__)
     print("vllm", vllm.__version__)
+    print("Can see instruct:", model_info("meta-llama/Llama-3.1-8B-Instruct").sha)
+
 
 
 
