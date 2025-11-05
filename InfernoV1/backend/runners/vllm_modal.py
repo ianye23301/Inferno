@@ -200,42 +200,56 @@ def _bench_impl(args):
     temperature = float(cfg.get("temperature", 0.7))
     top_p = float(cfg.get("top_p", 0.9))
 
-    # Prompts for benchmarking (batch sized, controlled prefill)
     single_prompt = _mk_prompt(input_tokens)
     prompts = [single_prompt] * batch_size
 
     # Build LLM (measure model init separately, not TTFT)
     t_init0 = time.time()
     llm = LLM(**llm_kwargs)
-    init_time = time.time() - t_init0  # model load time (not TTFT)
+    init_time = time.time() - t_init0  # optional debug
 
-    # Streaming generation to measure TTFT and decode TPS properly
     sampling = SamplingParams(
         temperature=temperature,
         max_tokens=max_new_tokens,
         top_p=top_p
     )
 
-    # vLLM streaming: yields RequestOutput objects incrementally
+    # Non-streaming generate; use per-request metrics for TTFT if available
     t_start = time.time()
-    first_token_at = None
-    total_new_tokens = 0
-    # Note: stream=True yields outputs as they arrive
-    for req_out in llm.generate(prompts, sampling, use_tqdm=False, stream=True):
-        # For the very first emitted text from any request, record TTFT
-        if first_token_at is None:
-            # A chunk has arrived
-            first_token_at = time.time()
-        # Count tokens in this chunk (sum across request outputs)
-        for out in req_out.outputs:
-            total_new_tokens += len(out.token_ids_delta or [])
-
+    outputs = llm.generate(prompts, sampling, use_tqdm=False)
     t_end = time.time()
 
-    # Metrics
-    ttft_s = (first_token_at - t_start) if first_token_at else 0.0
-    gen_time = (t_end - (first_token_at or t_start))
-    throughput = (total_new_tokens / gen_time) if gen_time > 0 and total_new_tokens else 0.0
+    # Aggregate metrics
+    total_new_tokens = 0
+    ttft_values = []
+    for o in outputs:
+        # total generated tokens
+        if o.outputs and len(o.outputs) > 0:
+            total_new_tokens += len(o.outputs[0].token_ids)
+
+        # TTFT from vLLM metrics when available (names vary by version)
+        m = getattr(o, "metrics", None) or {}
+        # prefer explicit first-token latency if present
+        ft = None
+        for k in ("first_token_latency", "first_token_time", "time_to_first_token"):
+            if k in m and m[k] is not None:
+                ft = float(m[k])
+                break
+        if ft is not None:
+            ttft_values.append(ft)
+
+    # If vLLM didn't expose TTFT, fall back to a conservative estimate:
+    # "prefill time" ~= total wall time times (input_tokens / (input_tokens + total_new_tokens))
+    wall = max(1e-6, t_end - t_start)
+    if ttft_values:
+        ttft_s = sum(ttft_values) / len(ttft_values)
+        decode_time = max(1e-6, wall - ttft_s)
+    else:
+        approx_prefill = wall * (input_tokens / max(1.0, input_tokens + total_new_tokens))
+        ttft_s = approx_prefill
+        decode_time = max(1e-6, wall - ttft_s)
+
+    throughput = (total_new_tokens / decode_time) if total_new_tokens > 0 else 0.0
 
     metrics = {
         "model": model_name,
@@ -252,7 +266,7 @@ def _bench_impl(args):
         "ttft_s": ttft_s,
         "accuracy": None,
         "timestamp": datetime.utcnow().isoformat() + "Z",
-        # "model_load_s": init_time,  # Optional: keep for debugging
+        # "model_load_s": init_time,
     }
     print(json.dumps({"event": "metrics", "data": metrics}))
     return metrics
