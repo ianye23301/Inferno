@@ -1,7 +1,6 @@
 # backend/runners/trtllm_qwen_modal.py
-from __future__ import annotations
 import os, json, time
-from typing import Any, Dict
+from typing import Dict, Any
 from pathlib import Path
 import modal
 from backend.eval.python import eval_python
