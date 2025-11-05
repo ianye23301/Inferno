@@ -1,10 +1,10 @@
 # backend/runners/vllm_modal.py
 from __future__ import annotations
-import json, time, os
+import os, json, time
 from datetime import datetime
-import modal
-from modal import gpu as mgpu
+from typing import Any, Dict
 
+import modal
 
 APP_NAME = "inferno-vllm-bench-mock"
 HF_SECRET_NAME = "hf-token"  # Secret must define HUGGINGFACE_HUB_TOKEN or HF_TOKEN
@@ -16,10 +16,10 @@ image = (
         "nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04",
         add_python="3.10",
     )
-    .pip_install("numpy==1.26.4")  # keep <2 to dodge ABI drama
+    .pip_install("numpy==1.26.4")  # keep <2 for ABI stability
     .pip_install(
-        # ✅ Match vLLM 0.6.2’s exact requirement:
-        "torch==2.4.0",               # cu121 wheel
+        # vLLM 0.6.x + CUDA 12.1 compatible stack
+        "torch==2.4.0",
         "vllm==0.6.2",
         "transformers==4.45.2",
         "accelerate==1.11.0",
@@ -36,43 +36,46 @@ image = (
 
 HF_SECRET = modal.Secret.from_name(HF_SECRET_NAME)
 
+
+# ---------------------------
+# Helpers
+# ---------------------------
+
 def _get_hf_token() -> str:
-    """Read HF token from either env var name and mirror it to both names."""
     tok = os.environ.get("HUGGINGFACE_HUB_TOKEN") or os.environ.get("HF_TOKEN")
     if not tok:
         raise RuntimeError(
             f"Missing Hugging Face token. Provide it via Modal secret '{HF_SECRET_NAME}' "
             "with key HUGGINGFACE_HUB_TOKEN or HF_TOKEN."
         )
-    # Mirror to both env names so every lib (and child processes) can find it.
+    # mirror for downstream libs
     os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", tok)
     os.environ.setdefault("HF_TOKEN", tok)
     return tok
 
+
 def _check_hf_access(model_id: str):
-    """Lightweight check that the token works and can see the model."""
     from huggingface_hub import whoami, model_info
     tok = _get_hf_token()
-    print("HF whoami:", whoami(token=tok))
-    # Throws if gated/no access:
+    try:
+        print("HF whoami:", whoami(token=tok))
+    except Exception as e:
+        print("HF whoami() failed:", repr(e))
     _ = model_info(model_id, token=tok)
     print(f"HF access OK: {model_id}")
 
-def _coerce_args(args):
+
+def _coerce_args(args: Any) -> Dict[str, Any]:
     # Accept dict directly
     if isinstance(args, dict):
         return args
-
-    # If Modal delivers a list, unwrap it
+    # Modal CLI --args '[{...}]'
     if isinstance(args, list):
         if len(args) == 1 and isinstance(args[0], dict):
             return args[0]
-        # Handle double-nested [[payload]]
         if len(args) == 1 and isinstance(args[0], list) and len(args[0]) == 1 and isinstance(args[0][0], dict):
             return args[0][0]
         return {}
-
-    # If stringified JSON, parse and unwrap
     if isinstance(args, str):
         try:
             obj = json.loads(args)
@@ -85,7 +88,11 @@ def _coerce_args(args):
     return {}
 
 
-@app.function(image=image, gpu="H100", timeout=60*30, secrets=[HF_SECRET])
+# ---------------------------
+# Sanity / env check
+# ---------------------------
+
+@app.function(image=image, gpu="H100:1", timeout=60*30, secrets=[HF_SECRET])
 def env_check():
     import torch, numpy, transformers, vllm
     print("PYTHONNOUSERSITE=", os.environ.get("PYTHONNOUSERSITE"))
@@ -99,55 +106,30 @@ def env_check():
     print("Has HUGGINGFACE_HUB_TOKEN:", "HUGGINGFACE_HUB_TOKEN" in os.environ)
     print("Has HF_TOKEN:", "HF_TOKEN" in os.environ)
 
-    # Verify token + model access (adjust model if you use a different one)
     _check_hf_access("meta-llama/Llama-3.1-8B-Instruct")
 
-# --- H100 variants ---
-@app.function(image=image, gpu="H100", timeout=60*30, secrets=[HF_SECRET])
-def bench_h100(args): return _bench_impl(args)
 
-@app.function(image=image, gpu=mgpu.H100(count=2), timeout=60*30, secrets=[HF_SECRET])
-def bench_h100x2(args): return _bench_impl(args)
+# ---------------------------
+# Core bench impl
+# ---------------------------
 
-@app.function(image=image, gpu=mgpu.H100(count=4), timeout=60*30, secrets=[HF_SECRET])
-def bench_h100x4(args): return _bench_impl(args)
-
-# --- H200 variants ---
-@app.function(image=image, gpu="H200", timeout=60*30, secrets=[HF_SECRET])
-def bench_h200(args): return _bench_impl(args)
-
-@app.function(image=image, gpu=mgpu.H200(count=2), timeout=60*30, secrets=[HF_SECRET])
-def bench_h200x2(args): return _bench_impl(args)
-
-# --- B200 variants ---
-@app.function(image=image, gpu="B200", timeout=60*30, secrets=[HF_SECRET])
-def bench_b200(args): return _bench_impl(args)
-
-@app.function(image=image, gpu=mgpu.B200(count=2), timeout=60*30, secrets=[HF_SECRET])
-def bench_b200x2(args): return _bench_impl(args)
-
-# --- A100-80GB variants ---
-@app.function(image=image, gpu="A100", timeout=60*30, secrets=[HF_SECRET])
-def bench_a100(args): return _bench_impl(args)
-
-@app.function(image=image, gpu=mgpu.A100(count=2, memory="80GB"), timeout=60*30, secrets=[HF_SECRET])
-def bench_a100x2(args): return _bench_impl(args)
-
-    
-def _bench_impl(args):
+def _bench_impl(args: Any):
+    # env hygiene
     os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
     from vllm import LLM, SamplingParams
     from transformers.utils.hub import cached_file
-    import json, pathlib  # <- unconditionally here, not inside an if
+    import pathlib
 
-    args = _coerce_args(args)
-    model_name = args.get("model", "meta-llama/Llama-3.1-8B-Instruct")
-    cfg        = args.get("config", {}) or {}
-    run_env    = args.get("env", {}) or {}
-    num_gpus   = int(args.get("num_gpus", 1))
+    payload = _coerce_args(args)
+    model_name = payload.get("model", "meta-llama/Llama-3.1-8B-Instruct")
+    cfg        = payload.get("config", {}) or {}
+    run_env    = payload.get("env", {}) or {}
+    num_gpus   = int(payload.get("num_gpus", 1))
+    dataset    = payload.get("dataset")  # optional: list or path to jsonl
 
+    # apply per-run env
     for k, v in run_env.items():
         os.environ[str(k)] = str(v)
 
@@ -155,25 +137,19 @@ def _bench_impl(args):
     tp         = int(cfg.get("tensor_parallel", 1))
     quant      = cfg.get("quantization", "none")
 
-    # Verify the container has the requested GPU count (sanity check).
-    try:
-        import torch
-        vis = torch.cuda.device_count()
-        if vis != num_gpus:
-            print(f"[inferno] WARNING: container sees {vis} GPUs but num_gpus={num_gpus}. Proceeding.")
-    except Exception as _:
-        pass
+    # Ensure HF token exists (and warms cache access)
+    tok = _get_hf_token()
+    _ = cached_file(model_name, "config.json", token=tok)
+    print(f"Fetched {model_name}/config.json OK")
 
-    # Backend selection: mp for 1 GPU, ray for >1 GPUs
+    # Single vs multi-gpu backends
     if num_gpus <= 1:
         os.environ["VLLM_USE_RAY"] = "0"
         dist_backend = "mp"
-        # Keep TP=1 on single GPU
         if tp != 1:
             print(f"[inferno] For single-GPU container, forcing tensor_parallel=1 (was {tp}).")
             tp = 1
     else:
-        # multi-GPU: use ray (default). Ensure env doesn’t force-disable it.
         os.environ.pop("VLLM_USE_RAY", None)
         dist_backend = "ray"
 
@@ -183,15 +159,20 @@ def _bench_impl(args):
         distributed_executor_backend=dist_backend,
         download_dir=os.environ.get("HF_HOME", "/root/.cache/huggingface"),
         trust_remote_code=False,
-        # If chunked prefill causes issues, uncomment:
+        # If you hit issues with long contexts, uncomment:
         # enable_chunked_prefill=False,
     )
     if quant and quant != "none":
         llm_kwargs["quantization"] = quant
 
-    t0  = time.time()
+    # --- TTFT
+    t0 = time.time()
     llm = LLM(**llm_kwargs)
     ttft = time.time() - t0
+
+    # --- Throughput
+    prompts = ["The quick brown fox jumps over the lazy dog."] * batch_size
+    sampling = SamplingParams(temperature=0.8, max_tokens=64)
 
     t1 = time.time()
     outputs = llm.generate(prompts, sampling)
@@ -199,27 +180,25 @@ def _bench_impl(args):
     total_tokens = sum(len(o.outputs[0].token_ids) for o in outputs)
     throughput = total_tokens / gen_time if gen_time > 0 else 0.0
 
-    # --- Minimal opt-in accuracy harness (substring EM)
-    # Accept either:
-    #  - dataset = [{"prompt": "...", "answer_substr": "..."}]
-    #  - dataset = path to a JSONL with those fields
+    # --- Minimal optional accuracy (substring EM)
     accuracy = None
     if dataset:
-        import json, pathlib
         def _load_ds(ds):
-            if isinstance(ds, list): return ds
+            if isinstance(ds, list):
+                return ds
             p = pathlib.Path(str(ds))
             if p.exists():
                 return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
             return []
-        eval_recs = _load_ds(dataset)[:32]  # small, fast sanity-check eval
+        eval_recs = _load_ds(dataset)[:32]
         if eval_recs:
             eval_prompts = [r["prompt"] for r in eval_recs]
             eval_outs = llm.generate(eval_prompts, SamplingParams(temperature=0.0, max_tokens=64))
             hits = 0
             for r, out in zip(eval_recs, eval_outs):
                 text = out.outputs[0].text
-                if r.get("answer_substr") and r["answer_substr"].lower() in text.lower():
+                ans = (r.get("answer_substr") or "").strip()
+                if ans and ans.lower() in text.lower():
                     hits += 1
             accuracy = hits / len(eval_recs)
 
@@ -233,3 +212,32 @@ def _bench_impl(args):
     }
     print(json.dumps({"event": "metrics", "data": metrics}))
     return metrics
+
+
+# ---------------------------
+# Dynamic function registration (new GPU string syntax)
+# ---------------------------
+
+_GPU_POOLS = ["H100", "H200", "B200", "A100-80GB"]
+_COUNTS_BY_POOL = {
+    "H100": [1, 2, 4],
+    "H200": [1, 2],
+    "B200": [1, 2],
+    "A100-80GB": [1, 2],
+}
+
+def _register_modal_fn(name: str, gpu_str: str):
+    @app.function(image=image, gpu=gpu_str, timeout=60*30, secrets=[HF_SECRET])
+    def _runner(args):
+        return _bench_impl(args)
+    _runner.__name__ = name
+    globals()[name] = _runner
+    return _runner
+
+# Generate: bench_h100, bench_h100x2, bench_h100x4, bench_h200, bench_h200x2, ...
+for pool in _GPU_POOLS:
+    for c in _COUNTS_BY_POOL[pool]:
+        gpu_str = f"{pool}:{c}"
+        suffix = "" if c == 1 else f"x{c}"
+        fn_name = f"bench_{pool.lower().replace('-', '')}{suffix}"
+        _register_modal_fn(fn_name, gpu_str)

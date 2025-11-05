@@ -6,6 +6,11 @@ from settings import RUNS_DIR
 from logger import log_event
 from engines.vllm_args import build_modal_payload
 
+def _fn_name_for(pool: str, count: int) -> str:
+    base = pool.lower().replace("-", "")   # e.g. "A100-80GB" -> "a10080gb"
+    suffix = "" if count == 1 else f"x{count}"
+    return f"backend.runners.vllm_modal::bench_{base}{suffix}"
+
 
 class ModalDriver:
     """
@@ -22,6 +27,7 @@ class ModalDriver:
     def cancel(self, modal_job_id: str) -> None:
         # Not supported in CLI blocking mode (MVP)
         pass
+    
 
     def execute_locally_and_collect(self, run_id: str, spec: Dict[str, Any], config: Dict[str, Any]) -> str:
         # Ensure modal CLI exists
@@ -47,18 +53,14 @@ class ModalDriver:
         }
         gpu_pool = spec.get("gpu_pool", "H100")
         num_gpus = int(spec.get("num_gpus", 1))
-        fn = fn_by_pool_and_count.get((gpu_pool, num_gpus))
-        if not fn:
-            raise RuntimeError(
-                f"No Modal function defined for pool={gpu_pool} with num_gpus={num_gpus}. "
-                f"Available: {sorted(set(k for k in fn_by_pool_and_count.keys() if k[0]==gpu_pool))}"
-            )        
-        # Use --args with JSON string (no temp file needed)
+        fn = _fn_name_for(gpu_pool, num_gpus)
+
         cmd = [
             "modal", "run", "-m",
-            f"backend.runners.vllm_modal::{fn}",
-            "--args", json.dumps([payload]),  # NOTE: wrap in a list!
+            fn,
+            "--args", json.dumps([payload]),
         ]
+        # Use --args with JSON string (no temp file needed)
 
         log_event("modal_cli_start", run_id=run_id, cmd=" ".join(cmd))
         proc = subprocess.Popen(cmd, cwd="..", stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
