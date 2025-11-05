@@ -100,7 +100,7 @@ def _ensure_engine(args) -> str:
 
     # Convert HF -> TRT-LLM
     conv = [
-        "python", "/opt/TensorRT-LLM/examples/qwen/convert_checkpoint.py",
+        "python", "/opt/TensorRT-LLM/examples/models/core/qwen/convert_checkpoint.py",
         "--model_dir", model,
         "--output_dir", str(ckpt_dir),
         "--dtype", dtype,
