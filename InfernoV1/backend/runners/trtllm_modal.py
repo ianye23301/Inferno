@@ -14,11 +14,19 @@ vol = modal.Volume.from_name(ENGINE_VOL, create_if_missing=True)
 
 image = (
     modal.Image.from_registry("nvcr.io/nvidia/pytorch:25.03-py3")
-    .pip_install(
-        "tensorrt-llm",
-        extra_index_url="https://pypi.nvidia.com"
+    .apt_install("git", "git-lfs")
+    .pip_install("nvidia-ml-py")
+    .env({"PIP_CONSTRAINT": ""})
+    .run_commands(
+        "git lfs install",
+        "git clone https://github.com/NVIDIA/TensorRT-LLM.git /tmp/trt-llm",
+        "cd /tmp/trt-llm && git checkout main",
+        "cd /tmp/trt-llm && git lfs pull",
+        # Use precompiled - downloads the right version automatically
+        "cd /tmp/trt-llm && TRTLLM_USE_PRECOMPILED=1 pip install .",
     )
 )
+
 @lru_cache(maxsize=1)
 def _trtllm_supported_flags() -> set[str]:
     try:
