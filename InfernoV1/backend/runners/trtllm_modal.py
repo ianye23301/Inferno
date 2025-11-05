@@ -12,57 +12,37 @@ ENGINE_VOL = "trtllm-engines"
 app = modal.App(APP_NAME)
 vol = modal.Volume.from_name(ENGINE_VOL, create_if_missing=True)
 
-# NOTE: We do NOT need torch for TRT-LLM ModelRunner. Removing torch avoids CUDA kernel/arch issues on B200.
+## Use NVIDIA's NGC PyTorch container with B200 support
 image = (
     modal.Image.from_registry(
-        "nvidia/cuda:12.6.2-cudnn-runtime-ubuntu22.04", add_python="3.10"
+        "nvcr.io/nvidia/pytorch:25.01-py3",  # Has sm_100 support built-in
+        setup_dockerfile_commands=[
+            "ENV DEBIAN_FRONTEND=noninteractive",
+        ]
     )
-    .apt_install(
-        "git", "wget", "openmpi-bin", "libopenmpi-dev"
-    )
-    # Remove conflicting wheels before fresh install
-    .run_commands(
-        "python -m pip uninstall -y "
-        "torch torchvision torchaudio flash-attn flashinfer cuda cuda-nvcc cuda-runtime tensorrt-llm || true"
-    )
-    # Core Python deps (no torch yet)
+    .apt_install("git", "wget")  # openmpi already included
+    # Don't uninstall torch - we need the NGC version!
     .pip_install(
-        "numpy==1.26.4",
         "tokenizers>=0.19.1",
         "transformers==4.45.2",
         "huggingface_hub>=0.24.0",
-        "mpi4py==3.1.6",
     )
-    # Install PyTorch cu124 with SM_100 support for B200
-    .run_commands(
-        "python -m pip install --index-url https://download.pytorch.org/whl/cu124 "
-        "torch==2.6.0"
-    )
-    # TRT-LLM and cuda-python from NVIDIA index
+    # Install TensorRT-LLM (compatible with container's PyTorch)
     .run_commands(
         "python -m pip install --extra-index-url https://pypi.nvidia.com "
-        "cuda-python==12.6.0 tensorrt-llm==0.21.0"
+        "tensorrt-llm==0.21.0"
     )
-    # Pull TRT-LLM examples (for converters)
-    .run_commands("git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM /opt/TensorRT-LLM")
-    # One-line sanity (no heredoc)
+    # Pull TRT-LLM examples for converters
     .run_commands(
-        "python -c \"from cuda import cuda, cudart; print('cuda-python OK'); "
-        "import torch; print('Torch', torch.__version__)\""
+        "git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM /opt/TensorRT-LLM"
     )
     .env({
         "TOKENIZERS_PARALLELISM": "false",
         "NCCL_P2P_DISABLE": "1",
-        "OMPI_ALLOW_RUN_AS_ROOT": "1",
-        "OMPI_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
-        "LD_LIBRARY_PATH": "/usr/local/cuda/lib64:/usr/local/lib:/usr/lib/x86_64-linux-gnu/openmpi/lib:${LD_LIBRARY_PATH}",
         "PYTHONNOUSERSITE": "1",
-        # Optional: block surprise CUDA JITs from transitive deps
         "FLASHINFER_DISABLE": "1",
-        # "CUDA_LAUNCH_BLOCKING": "1",  # enable only when debugging
     })
 )
-
 
 @lru_cache(maxsize=1)
 def _trtllm_supported_flags() -> set[str]:
