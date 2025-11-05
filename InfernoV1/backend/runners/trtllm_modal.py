@@ -20,44 +20,41 @@ image = (
         "openmpi-bin",
         "libopenmpi-dev",
     )
-    # 1) Clean any rogue 'cuda' package first (namesake on PyPI)
+    # Ensure no rogue 'cuda' package
     .run_commands("python -m pip uninstall -y cuda || true")
-    # 2) Pin wheels that we actually need
+    # Core wheels
     .pip_install(
         "numpy==1.26.4",
         "transformers==4.45.2",
         "huggingface_hub>=0.24.0",
-        "torch==2.4.0",            # ok w/ CUDA 12.x base; used only for tokenization tensors
+        "torch==2.4.0",
         "mpi4py==3.1.6",
     )
-    # 3) Install cuda-python from NVIDIA index (provides 'from cuda import cuda, cudart')
-    .run_commands("python -m pip install --extra-index-url https://pypi.nvidia.com cuda-python==12.6.0")
-    # 4) Install TensorRT-LLM wheels
-    .run_commands("python -m pip install --extra-index-url https://pypi.nvidia.com tensorrt-llm==0.20.0")
-    # 5) Pull TRT-LLM repo for tools (optional)
-    .run_commands("git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM /opt/TensorRT-LLM")
-    # 6) Early import smoke test: fail fast if cuda-python or TRT-LLM isn’t importable
+    # Install cuda-python and TensorRT-LLM from NVIDIA index
     .run_commands(
-        'python - << "PY"\n'
-        "import sys\n"
-        "print('Python', sys.version)\n"
-        "from cuda import cuda, cudart\n"
-        "print('cuda-python OK:', cuda, cudart)\n"
-        "import tensorrt_llm\n"
-        "print('tensorrt-llm OK:', tensorrt_llm.__version__)\n"
-        "PY\n"
+        "python -m pip install --extra-index-url https://pypi.nvidia.com "
+        "cuda-python==12.6.0 tensorrt-llm==0.20.0"
+    )
+    # Optional: tools repo
+    .run_commands("git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM /opt/TensorRT-LLM")
+    # Simple smoke test (NO heredoc)
+    .run_commands(
+        'python -c "'
+        'from cuda import cuda, cudart; '
+        'import tensorrt_llm, sys; '
+        'print(\'cuda-python OK\', bool(cuda)); '
+        'print(\'tensorrt-llm\', tensorrt_llm.__version__)"'
     )
     .env({
         "TOKENIZERS_PARALLELISM": "false",
         "NCCL_P2P_DISABLE": "1",
         "OMPI_ALLOW_RUN_AS_ROOT": "1",
         "OMPI_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
-        # Ensure CUDA libs are visible (typically already set, but explicit is fine)
         "LD_LIBRARY_PATH": "/usr/local/cuda/lib64:/usr/local/lib:/usr/lib/x86_64-linux-gnu/openmpi/lib:${LD_LIBRARY_PATH}",
-        # Avoid user-site picking up stray packages named 'cuda'
         "PYTHONNOUSERSITE": "1",
     })
 )
+
 
 def _mk_prompt(base_tokens: int) -> str:
     base = ("Generate a runnable Python terminal game with a main() and replay loop. "
