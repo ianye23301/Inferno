@@ -224,19 +224,8 @@ def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
         "lookahead": lookahead, "max_seq_len": max_seq
     })
     tok = AutoTokenizer.from_pretrained(model, trust_remote_code=True, use_fast=True)
-    kv = KvCacheConfig(enable_block_reuse=True)
-    look = None
-    if lookahead > 0:
-        look = LookaheadDecodingConfig(
-            max_window_size=lookahead,
-            max_ngram_size=lookahead,
-            max_verification_set_size=lookahead
-        )
-    runner = ModelRunner.from_dir(
-        engine_dir,
-        kv_cache_config=kv,
-        lookahead_config=look
-    )
+    runner = ModelRunner.from_dir(engine_dir)
+
 
     # controlled-length prompt
     prompt = args.get("prompt") or _mk_prompt(input_tokens)
@@ -249,18 +238,29 @@ def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
     samp = SamplingConfig(temperature=temperature, top_p=top_p, max_new_tokens=max_new_tokens)
 
     t0 = time.perf_counter()
-    it_first = None
-    tokens = 0
-    for out in runner.generate_stream(input_ids=input_ids, sampling_config=samp):
-        if it_first is None and out.text_delta:
-            it_first = time.perf_counter()
-        if out.text_delta:
-            tokens += len(tok(out.text_delta, add_special_tokens=False)["input_ids"])
+    
+    # ModelRunner.generate() returns a dict, not a stream
+    outputs = runner.generate(
+        batch_input_ids=[input_ids],  # Must be a list
+        sampling_config=samp
+    )
+
     t1 = time.perf_counter()
 
-    ttft_s = (it_first - t0) if it_first else 0.0
-    gen_time = (t1 - (it_first or t0))
-    tps = (tokens / gen_time) if gen_time > 0 and tokens else 0.0
+    # Extract the generated tokens
+    # outputs structure: {'output_ids': [[batch_tokens]], ...}
+    if outputs and 'output_ids' in outputs:
+        output_ids = outputs['output_ids'][0][0]  # [batch_idx][beam_idx]
+        # Count only the newly generated tokens (exclude input)
+        tokens = len(output_ids) - len(input_ids)
+    else:
+        tokens = 0
+
+    total_time = t1 - t0
+    tps = (tokens / total_time) if total_time > 0 and tokens > 0 else 0.0
+
+    # Note: ModelRunner doesn't support streaming, so we can't measure TTFT
+    ttft_s = 0.0
 
     return {
         "model": model,
