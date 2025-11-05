@@ -46,7 +46,7 @@ class ModalDriver:
             payload = build_trtllm_payload(spec, config)
             # Full module::function strings as values
             fn_by_pool_and_count = {
-                ("B200", 1): "backend.runners.trtllm_qwen_modal::bench_b200",
+                ("B200", 1): "backend.runners.trtllm_modal::bench_b200",
                 # Add more as you implement them:
                 # ("H200", 1): "backend.runners.trtllm_qwen_modal::bench_h200",
                 # ("H100", 1): "backend.runners.trtllm_qwen_modal::bench_h100",
