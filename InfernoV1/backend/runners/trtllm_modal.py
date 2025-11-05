@@ -92,6 +92,15 @@ def _ensure_engine(args) -> str:
     if engine_dir.exists() and any(engine_dir.iterdir()):
         return str(engine_dir)
 
+    from huggingface_hub import snapshot_download
+    model_dir = Path("/engines") / "models" / model.replace("/", "_")
+    if not model_dir.exists():
+        print(f"Downloading {model} from HuggingFace...")
+        snapshot_download(
+            repo_id=model,
+            local_dir=str(model_dir),
+            local_dir_use_symlinks=False,
+        )
     ckpt_dir = Path("/engines") / f"{tag}_ckpt"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -101,9 +110,10 @@ def _ensure_engine(args) -> str:
     # Convert HF -> TRT-LLM
     conv = [
         "python", "/opt/TensorRT-LLM/examples/models/core/qwen/convert_checkpoint.py",
-        "--model_dir", model,
+        "--model_dir", str(model_dir),
         "--output_dir", str(ckpt_dir),
         "--dtype", "bfloat16",
+        "--tp_size", str(tp),  # Add this line
         "--use_parallel_embedding",
     ]
     subprocess.check_call(conv, env=env)
