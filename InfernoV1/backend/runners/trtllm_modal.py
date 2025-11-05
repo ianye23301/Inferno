@@ -205,7 +205,7 @@ def _ensure_engine(args) -> str:
     return str(engine_dir)
 
 def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
-    from tensorrt_llm.runtime import ModelRunner, SamplingConfig
+    from tensorrt_llm.runtime import ModelRunnerCpp, SamplingConfig
     from tensorrt_llm.bindings.executor import KvCacheConfig, LookaheadDecodingConfig
     from transformers import AutoTokenizer
 
@@ -223,8 +223,14 @@ def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
         "model": model, "dtype": dtype, "tensor_parallel": tp,
         "lookahead": lookahead, "max_seq_len": max_seq
     })
+
+    # Switch to the C++ executor wrapper and pass lookahead_config
+    runner = ModelRunnerCpp.from_dir(
+        engine_dir,
+        lookahead_config=[int(lookahead), 1, int(lookahead)],
+    )
     tok = AutoTokenizer.from_pretrained(model, trust_remote_code=True, use_fast=True)
-    runner = ModelRunner.from_dir(engine_dir)
+    # runner = ModelRunner.from_dir(engine_dir)
 
 
     # controlled-length prompt
