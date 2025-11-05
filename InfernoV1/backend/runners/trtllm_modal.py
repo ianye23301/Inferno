@@ -210,7 +210,6 @@ def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
     model = args.get("model", "Qwen/Qwen2.5-Coder-14B")
     dtype = args.get("dtype", "fp8")
     tp = int(args.get("tensor_parallel", 1))
-    # lookahead = int(args.get("lookahead", 6))
     lookahead = 0
     max_seq = int(args.get("max_seq_len", 6144))
     input_tokens = int(args.get("input_tokens", 250))
@@ -225,40 +224,49 @@ def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
     tok = AutoTokenizer.from_pretrained(model, trust_remote_code=True, use_fast=True)
     runner = ModelRunner.from_dir(engine_dir)
 
-
     # controlled-length prompt
     prompt = args.get("prompt") or _mk_prompt(input_tokens)
     # simple chat wrapper
     sys = "You are Qwen2.5-Coder. Return only code unless asked."
     text = f"<|im_start|>system\n{sys}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
     enc = tok(text, add_special_tokens=True)
-    input_ids = enc["input_ids"]  # list[int] is fine for TRT-LLM
+    input_ids = enc["input_ids"]
 
-    samp = SamplingConfig(temperature=temperature, top_p=top_p, max_new_tokens=max_new_tokens)
+    # Get end_id and pad_id from tokenizer
+    end_id = tok.eos_token_id if tok.eos_token_id is not None else tok.pad_token_id
+    pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+    
+    # Fallback if both are None (shouldn't happen with Qwen but just in case)
+    if end_id is None:
+        end_id = 151643  # Qwen2.5 default EOS
+    if pad_id is None:
+        pad_id = end_id
+
+    samp = SamplingConfig(
+        end_id=end_id,
+        pad_id=pad_id,
+        temperature=temperature,
+        top_p=top_p,
+        max_new_tokens=max_new_tokens
+    )
 
     t0 = time.perf_counter()
     
-    # ModelRunner.generate() returns a dict, not a stream
     outputs = runner.generate(
-        batch_input_ids=[input_ids],  # Must be a list
+        batch_input_ids=[input_ids],
         sampling_config=samp
     )
 
     t1 = time.perf_counter()
 
-    # Extract the generated tokens
-    # outputs structure: {'output_ids': [[batch_tokens]], ...}
     if outputs and 'output_ids' in outputs:
-        output_ids = outputs['output_ids'][0][0]  # [batch_idx][beam_idx]
-        # Count only the newly generated tokens (exclude input)
+        output_ids = outputs['output_ids'][0][0]
         tokens = len(output_ids) - len(input_ids)
     else:
         tokens = 0
 
     total_time = t1 - t0
     tps = (tokens / total_time) if total_time > 0 and tokens > 0 else 0.0
-
-    # Note: ModelRunner doesn't support streaming, so we can't measure TTFT
     ttft_s = 0.0
 
     return {
