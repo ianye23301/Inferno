@@ -14,58 +14,30 @@ vol = modal.Volume.from_name(ENGINE_VOL, create_if_missing=True)
 
 # NOTE: We do NOT need torch for TRT-LLM ModelRunner. Removing torch avoids CUDA kernel/arch issues on B200.
 image = (
+    # Use NGC PyTorch container - has B200-compatible PyTorch + TensorRT 10.9
     modal.Image.from_registry(
-        "nvidia/cuda:12.6.2-cudnn-devel-ubuntu22.04",
-        add_python="3.10"
+        "nvcr.io/nvidia/pytorch:25.03-py3",  # Includes TensorRT 10.9, CUDA 12.8.1
     )
-    .apt_install(
-        "git", "wget", "openmpi-bin", "libopenmpi-dev",
-        "build-essential", "cmake", "ninja-build", "ccache"
-    )
+    .apt_install("git", "build-essential", "cmake")
+    .pip_install("nvidia-ml-py")  # Replace deprecated pynvml
+    
+    # Build TensorRT-LLM from source (version that matches container's TensorRT)
     .run_commands(
-        # Clean up any existing installations
-        "python -m pip uninstall -y "
-        "torch torchvision torchaudio flash-attn flashinfer cuda cuda-nvcc cuda-runtime tensorrt-llm || true"
-    )
-    .pip_install(
-        "numpy==1.26.4",
-        "tokenizers>=0.19.1",
-        "transformers==4.45.2",
-        "huggingface_hub>=0.24.0",
-        "mpi4py==3.1.6",
-    )
-    # Option 1: Try PyTorch nightly with B200 support (RECOMMENDED - much faster)
-    .pip_install(
-        "torch==2.7.0.dev20250101",  # Use a recent nightly build
-        index_url="https://download.pytorch.org/whl/nightly/cu124"
-    )
-    
-    # Option 2: Build from source (commented out - only if nightly doesn't work)
-    # .run_commands(
-    #     "git clone --depth 1 --branch v2.7.0 https://github.com/pytorch/pytorch /tmp/pytorch",
-    #     "cd /tmp/pytorch && git submodule sync && git submodule update --init --recursive --jobs 0"
-    # )
-    # .env({
-    #     "TORCH_CUDA_ARCH_LIST": "9.0+PTX;10.0",  # PTX for forward compatibility
-    #     "CMAKE_PREFIX_PATH": "$(python -c 'import sys; print(sys.prefix)')",
-    #     "USE_NINJA": "1",
-    #     "MAX_JOBS": "8",  # Limit parallel jobs to avoid OOM during build
-    # })
-    # .run_commands(
-    #     "cd /tmp/pytorch && "
-    #     "pip install -r requirements.txt && "
-    #     "python setup.py develop && "  # Use develop instead of install for faster builds
-    #     "cd / && rm -rf /tmp/pytorch"
-    # )
-    
-    # Install TensorRT-LLM with B200 support
-    .pip_install(
-        "tensorrt-llm==0.21.0",
-        # You may need a newer version with B200 support
-    )
-    .pip_install(
-        "flashinfer",
-        "nvidia-ml-py",  # Replace deprecated pynvml
+        # Clone TensorRT-LLM at a version compatible with TensorRT 10.9
+        "git clone https://github.com/NVIDIA/TensorRT-LLM.git /tmp/trt-llm",
+        "cd /tmp/trt-llm && git checkout v1.0.0",  # or main/latest tag
+        
+        # Install dependencies
+        "cd /tmp/trt-llm && pip install -r requirements.txt",
+        
+        # Build TensorRT-LLM (it will use the container's TensorRT 10.9)
+        "cd /tmp/trt-llm && python scripts/build_wheel.py --clean",
+        
+        # Install the built wheel
+        "pip install /tmp/trt-llm/build/tensorrt_llm*.whl",
+        
+        # Cleanup
+        "rm -rf /tmp/trt-llm"
     )
 )
 
