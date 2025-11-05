@@ -129,13 +129,10 @@ def _ensure_engine(args) -> str:
     return str(engine_dir)
 
 def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
-    from tensorrt_llm.runtime import (
-        ModelRunner,
-        KvCacheConfig,
-        LookaheadDecodingConfig,
-        SamplingConfig,
-    )
+    from tensorrt_llm.runtime import ModelRunner, SamplingConfig
+    from tensorrt_llm.bindings.executor import KvCacheConfig, LookaheadDecodingConfig
     from transformers import AutoTokenizer
+    
     model = args.get("model", "Qwen/Qwen2.5-Coder-14B")
     dtype = args.get("dtype", "fp8")
     tp = int(args.get("tensor_parallel", 1))
