@@ -14,33 +14,19 @@ vol = modal.Volume.from_name(ENGINE_VOL, create_if_missing=True)
 
 # NOTE: We do NOT need torch for TRT-LLM ModelRunner. Removing torch avoids CUDA kernel/arch issues on B200.
 image = (
-    # Use NGC PyTorch container - has B200-compatible PyTorch + TensorRT 10.9
-    modal.Image.from_registry(
-        "nvcr.io/nvidia/pytorch:25.03-py3",  # Includes TensorRT 10.9, CUDA 12.8.1
-    )
+    modal.Image.from_registry("nvcr.io/nvidia/pytorch:25.03-py3")
     .apt_install("git", "build-essential", "cmake")
-    .pip_install("nvidia-ml-py")  # Replace deprecated pynvml
-    
-    # Build TensorRT-LLM from source (version that matches container's TensorRT)
+    .pip_install("nvidia-ml-py")
+    .env({"PIP_CONSTRAINT": ""})  # Disable pip constraints
     .run_commands(
-        # Clone TensorRT-LLM at a version compatible with TensorRT 10.9
         "git clone https://github.com/NVIDIA/TensorRT-LLM.git /tmp/trt-llm",
-        "cd /tmp/trt-llm && git checkout v1.0.0",  # or main/latest tag
-        
-        # Install dependencies
-        "cd /tmp/trt-llm && pip install -r requirements.txt",
-        
-        # Build TensorRT-LLM (it will use the container's TensorRT 10.9)
+        "cd /tmp/trt-llm && git checkout main",
+        "pip install -r /tmp/trt-llm/requirements.txt",
         "cd /tmp/trt-llm && python scripts/build_wheel.py --clean",
-        
-        # Install the built wheel
         "pip install /tmp/trt-llm/build/tensorrt_llm*.whl",
-        
-        # Cleanup
         "rm -rf /tmp/trt-llm"
     )
 )
-
 
 @lru_cache(maxsize=1)
 def _trtllm_supported_flags() -> set[str]:
