@@ -220,43 +220,63 @@ def _bench_impl(args):
     t_end = time.time()
 
     # Aggregate metrics
+        # Aggregate metrics
     total_new_tokens = 0
     ttft_values = []
 
+    def _norm_seconds(x: float) -> float:
+        # normalize ms/ns if someone logged those
+        if x > 1e6:   # likely ns
+            return x / 1e9
+        if x > 1e3:   # likely ms
+            return x / 1e3
+        return x
+
     for o in outputs:
-        # total generated tokens for the first candidate
+        # count generated tokens (first hypothesis)
         if o.outputs and len(o.outputs) > 0:
             total_new_tokens += len(o.outputs[0].token_ids)
 
-        # vLLM 0.6.x: metrics may be a RequestMetrics object (not dict)
         m = getattr(o, "metrics", None)
+        if m is None:
+            continue
+
+        # Try direct latency first
         ft = None
-        if m is not None:
-            # Try both object attributes and dict keys
-            candidates = ("first_token_latency", "first_token_time", "time_to_first_token")
+        for attr in ("first_token_latency", "first_token_latency_s"):
+            v = getattr(m, attr, None) if not isinstance(m, dict) else m.get(attr)
+            if v is not None:
+                ft = _norm_seconds(float(v))
+                break
+
+        # Fallback: derive from absolute times
+        if ft is None:
+            # vLLM often has these as seconds; normalize just in case
             if isinstance(m, dict):
-                for k in candidates:
-                    if m.get(k) is not None:
-                        ft = float(m[k])
-                        break
+                ft_time  = m.get("first_token_time")
+                req_time = m.get("request_start_time")
             else:
-                for k in candidates:
-                    v = getattr(m, k, None)
-                    if v is not None:
-                        ft = float(v)
-                        break
-        if ft is not None:
+                ft_time  = getattr(m, "first_token_time", None)
+                req_time = getattr(m, "request_start_time", None)
+
+            if ft_time is not None and req_time is not None:
+                ft = _norm_seconds(float(ft_time)) - _norm_seconds(float(req_time))
+
+        if ft is not None and ft >= 0:
             ttft_values.append(ft)
-            
-    # If vLLM didn't expose TTFT, fall back to a conservative estimate:
-    # "prefill time" ~= total wall time times (input_tokens / (input_tokens + total_new_tokens))
+
     wall = max(1e-6, t_end - t_start)
+
     if ttft_values:
         ttft_s = sum(ttft_values) / len(ttft_values)
+        # Clamp pathological cases (e.g., derived > wall due to clock mismatch)
+        if ttft_s >= wall:
+            ttft_s = wall * 0.9
         decode_time = max(1e-6, wall - ttft_s)
     else:
+        # conservative fallback: split wall time by input/share
         approx_prefill = wall * (input_tokens / max(1.0, input_tokens + total_new_tokens))
-        ttft_s = approx_prefill
+        ttft_s = min(approx_prefill, wall * 0.9)
         decode_time = max(1e-6, wall - ttft_s)
 
     throughput = (total_new_tokens / decode_time) if total_new_tokens > 0 else 0.0
