@@ -17,8 +17,8 @@ image = (
     .apt_install(
         "git",
         "wget",
-        "openmpi-bin",        # MPI runtime binaries
-        "libopenmpi-dev",     # Development headers for mpi4py compilation
+        "openmpi-bin",
+        "libopenmpi-dev",
     )
     # Base deps
     .pip_install(
@@ -26,9 +26,9 @@ image = (
         "transformers==4.45.2",
         "huggingface_hub>=0.24.0",
         "torch==2.4.0",
+        "mpi4py==3.1.6",
+        "cuda-python>=12.6.0",  # ✅ CUDA Python bindings for TensorRT-LLM
     )
-    # Install mpi4py AFTER openmpi is available
-    .pip_install("mpi4py==3.1.6")
     # TRT-LLM from NVIDIA index
     .run_commands(
         "python -m pip install --extra-index-url https://pypi.nvidia.com tensorrt-llm==0.20.0"
@@ -39,11 +39,9 @@ image = (
         "NCCL_P2P_DISABLE": "1",
         "OMPI_ALLOW_RUN_AS_ROOT": "1",
         "OMPI_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
-        # Ensure MPI libraries are in the loader path
         "LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu/openmpi/lib:/usr/local/lib:${LD_LIBRARY_PATH}",
     })
 )
-
 
 def _mk_prompt(base_tokens: int) -> str:
     base = ("Generate a runnable Python terminal game with a main() and replay loop. "
