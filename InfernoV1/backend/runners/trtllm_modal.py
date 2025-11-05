@@ -19,37 +19,37 @@ image = (
     )
     .apt_install(
         "git", "wget", "openmpi-bin", "libopenmpi-dev"
-        # If you ever JIT extensions, you'll also need gcc/g++ & make:
-        # "build-essential"
     )
-    # Clean out conflicting wheels
+    # Remove conflicting wheels before fresh install
     .run_commands(
-        "python -m pip uninstall -y torch torchvision torchaudio flash-attn flashinfer cuda || true"
+        "python -m pip uninstall -y "
+        "torch torchvision torchaudio flash-attn flashinfer cuda cuda-nvcc cuda-runtime tensorrt-llm || true"
     )
-    # Core Python deps (no torch here)
+    # Core Python deps (no torch yet)
     .pip_install(
         "numpy==1.26.4",
         "tokenizers>=0.19.1",
         "transformers==4.45.2",
         "huggingface_hub>=0.24.0",
         "mpi4py==3.1.6",
-        # optional utilities:
-        # "protobuf<6",
-        # "orjson",
     )
-    # Install PyTorch cu124 (bundled CUDA, includes SM_100 kernels)
+    # Install PyTorch cu124 with SM_100 support for B200
     .run_commands(
         "python -m pip install --index-url https://download.pytorch.org/whl/cu124 "
         "torch==2.6.0"
     )
-    # NVIDIA TRT-LLM + cuda-python
+    # TRT-LLM and cuda-python from NVIDIA index
     .run_commands(
         "python -m pip install --extra-index-url https://pypi.nvidia.com "
         "cuda-python==12.6.0 tensorrt-llm==0.21.0"
     )
+    # Pull TRT-LLM examples (for converters)
     .run_commands("git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM /opt/TensorRT-LLM")
-    # quick import sanity
-    .run_commands('python - <<\"PY\"\nfrom cuda import cuda,cudart;print(\"cuda-python OK\")\nimport torch;print(\"Torch\",torch.__version__)\nPY')
+    # One-line sanity (no heredoc)
+    .run_commands(
+        "python -c \"from cuda import cuda, cudart; print('cuda-python OK'); "
+        "import torch; print('Torch', torch.__version__)\""
+    )
     .env({
         "TOKENIZERS_PARALLELISM": "false",
         "NCCL_P2P_DISABLE": "1",
@@ -57,10 +57,9 @@ image = (
         "OMPI_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
         "LD_LIBRARY_PATH": "/usr/local/cuda/lib64:/usr/local/lib:/usr/lib/x86_64-linux-gnu/openmpi/lib:${LD_LIBRARY_PATH}",
         "PYTHONNOUSERSITE": "1",
-        # Prevent 3rd-party CUDA JITs from surprising you at runtime:
-        "FLASHINFER_DISABLE": "1",        # if flashinfer sneaks in from transitive deps
-        # Optional debug:
-        # "CUDA_LAUNCH_BLOCKING": "1",
+        # Optional: block surprise CUDA JITs from transitive deps
+        "FLASHINFER_DISABLE": "1",
+        # "CUDA_LAUNCH_BLOCKING": "1",  # enable only when debugging
     })
 )
 
