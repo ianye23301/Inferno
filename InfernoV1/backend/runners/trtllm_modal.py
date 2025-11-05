@@ -193,9 +193,44 @@ def _ensure_engine(args) -> str:
     print(f"Running: {' '.join(build)}")
     subprocess.check_call(build)
 
-    if not config_file.exists():
-        raise RuntimeError(f"Engine build failed - config.json not found in {engine_dir}")
-    print(f"Engine built successfully at {engine_dir}")
+    def _try_normalize_config_json(ed: Path) -> Path | None:
+        primary = ed / "config.json"
+        if primary.exists():
+            return primary
+        # Probe common alternates in this dir
+        for name in ("engine.json", "runtime_config.json", "model_config.json"):
+            alt = ed / name
+            if alt.exists():
+                shutil.copyfile(alt, primary)
+                return primary
+        # As a last resort, search shallowly for a JSON with model metadata
+        for p in ed.glob("*.json"):
+            if p.name != "config.json":
+                try:
+                    import json
+                    with open(p) as f:
+                        js = json.load(f)
+                    if isinstance(js, dict) and ("build_info" in js or "plugin" in json.dumps(js) or "version" in js):
+                        shutil.copyfile(p, primary)
+                        return primary
+                except Exception:
+                    pass
+        return None
+
+    normalized = _try_normalize_config_json(engine_dir)
+    if not normalized or not normalized.exists():
+        # Print a short tree for debugging and fail clearly
+        print("[ensure_engine] Engine dir contents:")
+        for p in sorted(engine_dir.glob("**/*")):
+            print(" -", p.relative_to(engine_dir))
+        raise RuntimeError(f"Engine build succeeded but config.json not found in {engine_dir}")
+
+    # --- Print a short tree (useful when debugging mismatches) ---
+    print("[ensure_engine] Final engine tree (depth 1):")
+    for p in sorted(engine_dir.glob("*")):
+        print(" -", p.name)
+
+    print(f"[ensure_engine] Engine ready at {engine_dir}")
     return str(engine_dir)
 
 def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
