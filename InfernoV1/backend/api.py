@@ -1,14 +1,14 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
 from uuid import uuid4
 from pathlib import Path
 import json, asyncio
 from models import JobSpec
 import sweeper, registry
 from scheduler import start_background_scheduler
-from settings import RUNS_DIR
-
+from settings import RUNS_DIR, JOBS_DIR
+import math
 
 app = FastAPI(title="Inferno Control Plane (MVP)")
 _background = start_background_scheduler()
@@ -92,3 +92,76 @@ def get_logs(run_id: str, follow: bool = False):
                 yield line
     return StreamingResponse(streamer(), media_type="text/plain")
 
+
+
+def _choose_best(job_name: str, metric: str, mode: str = "max") -> Tuple[dict, dict]:
+    """
+    Returns (run_row, metrics) for the best run in a job according to:
+      - primary: metric (+max or +min)
+      - tie-breakers: higher accuracy, then lower ttft_s
+    """
+    best_row, best_m = None, None
+
+    for row, m in registry.iter_job_metrics(job_name):
+        # Skip incomplete metric rows
+        if metric not in m or m[metric] is None:
+            continue
+        val = m[metric]
+        # normalize for comparison
+        def better(cur, best):
+            if best is None:
+                return True
+            # primary
+            if mode == "max":
+                if cur[metric] != best[metric]:
+                    return cur[metric] > best[metric]
+            else:
+                if cur[metric] != best[metric]:
+                    return cur[metric] < best[metric]
+            # tie-breakers: accuracy desc, ttft asc
+            ca, ba = (cur.get("accuracy"), best.get("accuracy"))
+            if (ca is not None) or (ba is not None):
+                if (ca or -1) != (ba or -1):
+                    return (ca or -1) > (ba or -1)
+            ctt, btt = (cur.get("ttft_s"), best.get("ttft_s"))
+            if (ctt is not None) and (btt is not None) and ctt != btt:
+                return ctt < btt
+            return False
+
+        if better(m, best_m):
+            best_row, best_m = row, m
+
+    if not best_row:
+        raise HTTPException(404, f"No metrics found for job '{job_name}' with metric '{metric}'")
+    return best_row, best_m
+
+
+@app.get("/jobs/{job_name}/best")
+def get_job_best(job_name: str, metric: str = "throughput_tok_s", mode: str = "max"):
+    # Compute winner
+    row, m = _choose_best(job_name, metric=metric, mode=mode)
+
+    # Persist a snapshot for easy reuse
+    payload = {
+        "job_name": job_name,
+        "metric": metric,
+        "mode": mode,
+        "run_id": row["run_id"],
+        "gpu_pool": row["gpu_pool"],
+        "config": m.get("config", {}),
+        "model": m.get("model"),
+        "metrics": {
+            "throughput_tok_s": m.get("throughput_tok_s"),
+            "ttft_s": m.get("ttft_s"),
+            "accuracy": m.get("accuracy"),
+            "timestamp": m.get("timestamp"),
+        },
+        "paths": {
+            "metrics_path": row.get("metrics_path"),
+            "logs_path": row.get("logs_path"),
+        },
+        "state": row.get("state"),
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    out_path = registry.write_job_best(job_name, metric, payload)
+    return payload

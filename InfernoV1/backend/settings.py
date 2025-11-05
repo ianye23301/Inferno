@@ -6,6 +6,9 @@ RESULTS_DIR = Path("./inferno_runs").resolve()
 RUNS_DIR = RESULTS_DIR / "runs"
 RUNS_DIR.mkdir(parents=True, exist_ok=True)
 
+JOBS_DIR = RESULTS_DIR / "jobs"      # NEW
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
+
 
 # concurrency limits per pool (MVP; tune as needed)
 ACTIVE_LIMIT: Dict[str, int] = {

@@ -41,6 +41,13 @@ def _run_once_for_pool(pool: str) -> None:
             "state": str(folder / "state.json"),
         })
         registry.transition(run_id, "COMPLETED")
+        # scheduler.py after marking COMPLETED
+        try:
+            import requests
+            # warm best-by-throughput cache
+            requests.get(f"http://localhost:8000/jobs/{spec.job_name}/best?metric=throughput_tok_s&mode=max", timeout=1.5)
+        except Exception:
+            pass  # best will compute on demand anyway
     except Exception as e:
         log_event("run_failed", run_id=run_id, error=str(e))
         registry.transition(run_id, "FAILED")
