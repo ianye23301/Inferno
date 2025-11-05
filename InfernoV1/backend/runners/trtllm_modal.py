@@ -156,6 +156,31 @@ def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
         "timestamp": time.time(),
     }
 
+
+def _coerce_args(args):
+    # Accept dict directly
+    if isinstance(args, dict):
+        return args
+    # If Modal delivers a list, unwrap it
+    if isinstance(args, list):
+        if len(args) == 1 and isinstance(args[0], dict):
+            return args[0]
+        if len(args) == 1 and isinstance(args[0], list) and len(args[0]) == 1 and isinstance(args[0][0], dict):
+            return args[0][0]
+        return {}
+    # If stringified JSON, parse and unwrap
+    if isinstance(args, str):
+        try:
+            obj = json.loads(args)
+            if isinstance(obj, dict):
+                return obj
+            if isinstance(obj, list) and len(obj) == 1 and isinstance(obj[0], dict):
+                return obj[0]
+        except Exception:
+            pass
+    return {}
+
+
 # --- Modal entrypoints per pool to match your CLI map ---
 @app.function(image=image, gpu="B200", secrets=[modal.Secret.from_name(HF_SECRET_NAME)],
              volumes={"/engines": vol}, timeout=60*30)
