@@ -168,8 +168,8 @@ def _ensure_engine(args) -> str:
         # Attention path often stays bf16 with FP8 GEMM; only add if flag exists
         if _has("--gpt_attention_plugin"):
             build += ["--gpt_attention_plugin", "bfloat16"]
-        if _has("--kv_cache_type"):
-            build += ["--kv_cache_type", "fp8"]       # builder owns KV dtype
+        # if _has("--kv_cache_type"):
+        #     build += ["--kv_cache_type", "fp8"]       # builder owns KV dtype
         # Only append strongly_typed if supported by this version
         if _has("--strongly_typed"):
             build += ["--strongly_typed"]
