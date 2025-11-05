@@ -13,28 +13,18 @@ app = modal.App(APP_NAME)
 vol = modal.Volume.from_name(ENGINE_VOL, create_if_missing=True)
 
 ## Use NVIDIA's NGC PyTorch container with B200 support
+# Use NVIDIA's TensorRT-LLM container (based on PyTorch 25.01)
 image = (
     modal.Image.from_registry(
-        "nvcr.io/nvidia/pytorch:25.01-py3",  # Has sm_100 support built-in
+        "nvcr.io/nvidia/tensorrt-llm:25.01-py3",  # All-in-one solution
         setup_dockerfile_commands=[
             "ENV DEBIAN_FRONTEND=noninteractive",
         ]
     )
-    .apt_install("git", "wget")  # openmpi already included
-    # Don't uninstall torch - we need the NGC version!
     .pip_install(
         "tokenizers>=0.19.1",
         "transformers==4.45.2",
         "huggingface_hub>=0.24.0",
-    )
-    # Install TensorRT-LLM (compatible with container's PyTorch)
-    .run_commands(
-        "python -m pip install --extra-index-url https://pypi.nvidia.com "
-        "tensorrt-llm==0.21.0"
-    )
-    # Pull TRT-LLM examples for converters
-    .run_commands(
-        "git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM /opt/TensorRT-LLM"
     )
     .env({
         "TOKENIZERS_PARALLELISM": "false",
@@ -139,10 +129,10 @@ def _ensure_engine(args) -> str:
     # (Some forks had /core/qwen; we use the canonical path.)
     print("Converting checkpoint...")
     conv = [
-        "python", "/opt/TensorRT-LLM/examples/models/core/qwen/convert_checkpoint.py",
+        "python", "/app/tensorrt_llm/examples/qwen/convert_checkpoint.py",  # Updated path
         "--model_dir", str(model_dir),
         "--output_dir", str(ckpt_dir),
-        "--dtype", "bfloat16",              # build bf16 weights; fp8 happens in plugins
+        "--dtype", "bfloat16",
         "--tp_size", str(tp),
         "--use_parallel_embedding",
     ]
