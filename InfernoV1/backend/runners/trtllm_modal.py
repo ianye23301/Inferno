@@ -14,25 +14,42 @@ vol = modal.Volume.from_name(ENGINE_VOL, create_if_missing=True)
 
 # NOTE: We do NOT need torch for TRT-LLM ModelRunner. Removing torch avoids CUDA kernel/arch issues on B200.
 image = (
-    modal.Image.from_registry("nvidia/cuda:12.6.2-cudnn-runtime-ubuntu22.04", add_python="3.10")
-    .apt_install("git", "wget", "openmpi-bin", "libopenmpi-dev")
-    .run_commands("python -m pip uninstall -y cuda || true")
+    modal.Image.from_registry(
+        "nvidia/cuda:12.6.2-cudnn-runtime-ubuntu22.04", add_python="3.10"
+    )
+    .apt_install(
+        "git", "wget", "openmpi-bin", "libopenmpi-dev"
+        # If you ever JIT extensions, you'll also need gcc/g++ & make:
+        # "build-essential"
+    )
+    # Clean out conflicting wheels
+    .run_commands(
+        "python -m pip uninstall -y torch torchvision torchaudio flash-attn flashinfer cuda || true"
+    )
+    # Core Python deps (no torch here)
     .pip_install(
         "numpy==1.26.4",
+        "tokenizers>=0.19.1",
         "transformers==4.45.2",
         "huggingface_hub>=0.24.0",
         "mpi4py==3.1.6",
-        "tokenizers>=0.19.1",
-        # Optional: for eval-only if you keep it; otherwise remove
+        # optional utilities:
         # "protobuf<6",
+        # "orjson",
     )
-    # NVIDIA wheels
+    # Install PyTorch cu124 (bundled CUDA, includes SM_100 kernels)
+    .run_commands(
+        "python -m pip install --index-url https://download.pytorch.org/whl/cu124 "
+        "torch==2.6.0"
+    )
+    # NVIDIA TRT-LLM + cuda-python
     .run_commands(
         "python -m pip install --extra-index-url https://pypi.nvidia.com "
         "cuda-python==12.6.0 tensorrt-llm==0.21.0"
     )
     .run_commands("git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM /opt/TensorRT-LLM")
-    .run_commands('python -c "from cuda import cuda, cudart; print(\'cuda-python import OK\')"')
+    # quick import sanity
+    .run_commands('python - <<\"PY\"\nfrom cuda import cuda,cudart;print(\"cuda-python OK\")\nimport torch;print(\"Torch\",torch.__version__)\nPY')
     .env({
         "TOKENIZERS_PARALLELISM": "false",
         "NCCL_P2P_DISABLE": "1",
@@ -40,10 +57,13 @@ image = (
         "OMPI_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
         "LD_LIBRARY_PATH": "/usr/local/cuda/lib64:/usr/local/lib:/usr/lib/x86_64-linux-gnu/openmpi/lib:${LD_LIBRARY_PATH}",
         "PYTHONNOUSERSITE": "1",
-        # For debugging CUDA crashes if needed:
-        # "CUDA_LAUNCH_BLOCKING": "1"
+        # Prevent 3rd-party CUDA JITs from surprising you at runtime:
+        "FLASHINFER_DISABLE": "1",        # if flashinfer sneaks in from transitive deps
+        # Optional debug:
+        # "CUDA_LAUNCH_BLOCKING": "1",
     })
 )
+
 
 @lru_cache(maxsize=1)
 def _trtllm_supported_flags() -> set[str]:
