@@ -12,27 +12,63 @@ ENGINE_VOL = "trtllm-engines"
 app = modal.App(APP_NAME)
 vol = modal.Volume.from_name(ENGINE_VOL, create_if_missing=True)
 
-## Use NVIDIA's NGC PyTorch container with B200 support
-# Use NVIDIA's TensorRT-LLM container (based on PyTorch 25.01)
+# NOTE: We do NOT need torch for TRT-LLM ModelRunner. Removing torch avoids CUDA kernel/arch issues on B200.
 image = (
     modal.Image.from_registry(
-        "nvcr.io/nvidia/tensorrt-llm:25.01-py3",  # All-in-one solution
-        setup_dockerfile_commands=[
-            "ENV DEBIAN_FRONTEND=noninteractive",
-        ]
+        "nvidia/cuda:12.6.2-cudnn-devel-ubuntu22.04",
+        add_python="3.10"
+    )
+    .apt_install(
+        "git", "wget", "openmpi-bin", "libopenmpi-dev",
+        "build-essential", "cmake", "ninja-build", "ccache"
+    )
+    .run_commands(
+        # Clean up any existing installations
+        "python -m pip uninstall -y "
+        "torch torchvision torchaudio flash-attn flashinfer cuda cuda-nvcc cuda-runtime tensorrt-llm || true"
     )
     .pip_install(
+        "numpy==1.26.4",
         "tokenizers>=0.19.1",
         "transformers==4.45.2",
         "huggingface_hub>=0.24.0",
+        "mpi4py==3.1.6",
     )
-    .env({
-        "TOKENIZERS_PARALLELISM": "false",
-        "NCCL_P2P_DISABLE": "1",
-        "PYTHONNOUSERSITE": "1",
-        "FLASHINFER_DISABLE": "1",
-    })
+    # Option 1: Try PyTorch nightly with B200 support (RECOMMENDED - much faster)
+    .pip_install(
+        "torch==2.7.0.dev20250101",  # Use a recent nightly build
+        index_url="https://download.pytorch.org/whl/nightly/cu124"
+    )
+    
+    # Option 2: Build from source (commented out - only if nightly doesn't work)
+    # .run_commands(
+    #     "git clone --depth 1 --branch v2.7.0 https://github.com/pytorch/pytorch /tmp/pytorch",
+    #     "cd /tmp/pytorch && git submodule sync && git submodule update --init --recursive --jobs 0"
+    # )
+    # .env({
+    #     "TORCH_CUDA_ARCH_LIST": "9.0+PTX;10.0",  # PTX for forward compatibility
+    #     "CMAKE_PREFIX_PATH": "$(python -c 'import sys; print(sys.prefix)')",
+    #     "USE_NINJA": "1",
+    #     "MAX_JOBS": "8",  # Limit parallel jobs to avoid OOM during build
+    # })
+    # .run_commands(
+    #     "cd /tmp/pytorch && "
+    #     "pip install -r requirements.txt && "
+    #     "python setup.py develop && "  # Use develop instead of install for faster builds
+    #     "cd / && rm -rf /tmp/pytorch"
+    # )
+    
+    # Install TensorRT-LLM with B200 support
+    .pip_install(
+        "tensorrt-llm==0.21.0",
+        # You may need a newer version with B200 support
+    )
+    .pip_install(
+        "flashinfer",
+        "nvidia-ml-py",  # Replace deprecated pynvml
+    )
 )
+
 
 @lru_cache(maxsize=1)
 def _trtllm_supported_flags() -> set[str]:
@@ -129,10 +165,10 @@ def _ensure_engine(args) -> str:
     # (Some forks had /core/qwen; we use the canonical path.)
     print("Converting checkpoint...")
     conv = [
-        "python", "/app/tensorrt_llm/examples/qwen/convert_checkpoint.py",  # Updated path
+        "python", "/opt/TensorRT-LLM/examples/models/core/qwen/convert_checkpoint.py",
         "--model_dir", str(model_dir),
         "--output_dir", str(ckpt_dir),
-        "--dtype", "bfloat16",
+        "--dtype", "bfloat16",              # build bf16 weights; fp8 happens in plugins
         "--tp_size", str(tp),
         "--use_parallel_embedding",
     ]
