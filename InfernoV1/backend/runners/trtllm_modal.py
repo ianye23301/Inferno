@@ -15,19 +15,15 @@ vol = modal.Volume.from_name(ENGINE_VOL, create_if_missing=True)
 image = (
     modal.Image.from_registry("nvidia/cuda:12.6.2-cudnn-runtime-ubuntu22.04", add_python="3.10")
     .apt_install("git", "wget")
-    # Base deps first
+    # Base deps first (torch wheel has cu121 tag; works fine here)
     .pip_install(
         "numpy==1.26.4",
         "transformers==4.45.2",
         "huggingface_hub>=0.24.0",
-        # torch is needed because we call .cuda() on tokenized input
         "torch==2.4.0",
     )
-    # Then install TRT-LLM from NVIDIA index using extra_options
-    .pip_install(
-        "tensorrt-llm==0.20.0",
-        extra_options=["--extra-index-url", "https://pypi.nvidia.com"],
-    )
+    # ✅ Use a plain string; NO brackets/lists
+    .run_commands("python -m pip install --extra-index-url https://pypi.nvidia.com tensorrt-llm==0.20.0")
     .run_commands("git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM /opt/TensorRT-LLM")
     .env({"TOKENIZERS_PARALLELISM": "false", "NCCL_P2P_DISABLE": "1"})
 )
