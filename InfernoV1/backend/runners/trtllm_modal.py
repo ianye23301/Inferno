@@ -140,7 +140,7 @@ def _ensure_engine(args) -> str:
     # (Some forks had /core/qwen; we use the canonical path.)
     print("Converting checkpoint...")
     conv = [
-        "python", "/opt/TensorRT-LLM/examples/models/qwen/convert_checkpoint.py",
+        "python", "/opt/TensorRT-LLM/examples/models/core/qwen/convert_checkpoint.py",
         "--model_dir", str(model_dir),
         "--output_dir", str(ckpt_dir),
         "--dtype", "bfloat16",              # build bf16 weights; fp8 happens in plugins
