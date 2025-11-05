@@ -222,22 +222,32 @@ def _bench_impl(args):
     # Aggregate metrics
     total_new_tokens = 0
     ttft_values = []
+
     for o in outputs:
-        # total generated tokens
+        # total generated tokens for the first candidate
         if o.outputs and len(o.outputs) > 0:
             total_new_tokens += len(o.outputs[0].token_ids)
 
-        # TTFT from vLLM metrics when available (names vary by version)
-        m = getattr(o, "metrics", None) or {}
-        # prefer explicit first-token latency if present
+        # vLLM 0.6.x: metrics may be a RequestMetrics object (not dict)
+        m = getattr(o, "metrics", None)
         ft = None
-        for k in ("first_token_latency", "first_token_time", "time_to_first_token"):
-            if k in m and m[k] is not None:
-                ft = float(m[k])
-                break
+        if m is not None:
+            # Try both object attributes and dict keys
+            candidates = ("first_token_latency", "first_token_time", "time_to_first_token")
+            if isinstance(m, dict):
+                for k in candidates:
+                    if m.get(k) is not None:
+                        ft = float(m[k])
+                        break
+            else:
+                for k in candidates:
+                    v = getattr(m, k, None)
+                    if v is not None:
+                        ft = float(v)
+                        break
         if ft is not None:
             ttft_values.append(ft)
-
+            
     # If vLLM didn't expose TTFT, fall back to a conservative estimate:
     # "prefill time" ~= total wall time times (input_tokens / (input_tokens + total_new_tokens))
     wall = max(1e-6, t_end - t_start)
