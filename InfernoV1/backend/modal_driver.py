@@ -5,6 +5,7 @@ from typing import Dict, Any
 from settings import RUNS_DIR
 from logger import log_event
 from engines.vllm_args import build_modal_payload
+from engines.trtllm_args import build_modal_payload as build_trtllm_payload
 
 def _fn_name_for(pool: str, count: int) -> str:
     base = pool.lower().replace("-", "")   # e.g. "A100-80GB" -> "a10080gb"
@@ -33,23 +34,35 @@ class ModalDriver:
         if not shutil.which("modal"):
             raise RuntimeError("Modal CLI not found. Install with `pip install modal` and run `modal token new`.")
 
-        payload = build_modal_payload(spec, config)
+        engine = spec.get("engine", "vllm")
+
         folder = RUNS_DIR / run_id
         logs_path = folder/"logs.txt"
         metrics_path = folder/"metrics.json"
 
-        gpu_pool = spec.get("gpu_pool", "H100")
-        fn_by_pool_and_count = {
-            ("H100", 1): "bench_h100",
-            ("H100", 2): "bench_h100x2",
-            ("H100", 4): "bench_h100x4",
-            ("H200", 1): "bench_h200",
-            ("H200", 2): "bench_h200x2",
-            ("B200", 1): "bench_b200",
-            ("B200", 2): "bench_b200x2",
-            ("A100-80GB", 1): "bench_a100",
-            ("A100-80GB", 2): "bench_a100x2",
-        }
+        if engine == "trtllm":
+            payload = build_trtllm_payload(spec, config)
+            fn_by_pool_and_count = {
+                ("B200", 1): ("backend.runners.trtllm_qwen_modal::bench_b200"),
+                # add more pools if you implement them:
+                # ("H200", 1): "backend.runners.trtllm_qwen_modal::bench_h200",
+                # ("H100", 1): "backend.runners.trtllm_qwen_modal::bench_h100",
+                # ("A100-80GB", 1): "backend.runners.trtllm_qwen_modal::bench_a100",
+            }
+        else:
+            payload = build_modal_payload(spec, config)
+            fn_by_pool_and_count = {
+                ("H100", 1): "backend.runners.vllm_modal::bench_h100",
+                ("H100", 2): "backend.runners.vllm_modal::bench_h100x2",
+                ("H100", 4): "backend.runners.vllm_modal::bench_h100x4",
+                ("H200", 1): "backend.runners.vllm_modal::bench_h200",
+                ("H200", 2): "backend.runners.vllm_modal::bench_h200x2",
+                ("B200", 1): "backend.runners.vllm_modal::bench_b200",
+                ("B200", 2): "backend.runners.vllm_modal::bench_b200x2",
+                ("A100-80GB", 1): "backend.runners.vllm_modal::bench_a100",
+                ("A100-80GB", 2): "backend.runners.vllm_modal::bench_a100x2",
+            }
+            
         gpu_pool = spec.get("gpu_pool", "H100")
         num_gpus = int(spec.get("num_gpus", 1))
         fn = fn_by_pool_and_count.get((gpu_pool, num_gpus))

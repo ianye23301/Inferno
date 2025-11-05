@@ -35,6 +35,13 @@ image = (
 
 HF_SECRET = modal.Secret.from_name(HF_SECRET_NAME)
 
+def _mk_prompt(base_tokens: int) -> str:
+    base = ("Generate a runnable Python terminal game with a main() and replay loop. "
+            "Keep commentary minimal and use standard library only. ")
+    filler = ("Provide clean structure and deterministic behavior. " * 200)
+    need_chars = max(0, base_tokens * 4 - len(base))  # ~4 chars/token heuristic
+    return base + filler[:need_chars]
+
 def _get_hf_token() -> str:
     """Read HF token from either env var name and mirror it to both names."""
     tok = os.environ.get("HUGGINGFACE_HUB_TOKEN") or os.environ.get("HF_TOKEN")
@@ -188,60 +195,64 @@ def _bench_impl(args):
     if quant and quant != "none":
         llm_kwargs["quantization"] = quant
 
-    # Define default prompts for benchmarking
-    prompts = [
-        "Write a short story about a robot learning to paint.",
-        "Explain quantum computing in simple terms.",
-        "What are the benefits of renewable energy?"
-    ] * batch_size
-    
-    # Default sampling parameters
+    input_tokens = int(cfg.get("input_tokens", 250))
+    max_new_tokens = int(cfg.get("max_new_tokens", 2048))
+    temperature = float(cfg.get("temperature", 0.7))
+    top_p = float(cfg.get("top_p", 0.9))
+
+    # Prompts for benchmarking (batch sized, controlled prefill)
+    single_prompt = _mk_prompt(input_tokens)
+    prompts = [single_prompt] * batch_size
+
+    # Build LLM (measure model init separately, not TTFT)
+    t_init0 = time.time()
+    llm = LLM(**llm_kwargs)
+    init_time = time.time() - t_init0  # model load time (not TTFT)
+
+    # Streaming generation to measure TTFT and decode TPS properly
     sampling = SamplingParams(
-        temperature=0.7,
-        max_tokens=cfg.get("max_tokens", 256),
-        top_p=0.9
+        temperature=temperature,
+        max_tokens=max_new_tokens,
+        top_p=top_p
     )
 
-    t0  = time.time()
-    llm = LLM(**llm_kwargs)
-    ttft = time.time() - t0
+    # vLLM streaming: yields RequestOutput objects incrementally
+    t_start = time.time()
+    first_token_at = None
+    total_new_tokens = 0
+    # Note: stream=True yields outputs as they arrive
+    for req_out in llm.generate(prompts, sampling, use_tqdm=False, stream=True):
+        # For the very first emitted text from any request, record TTFT
+        if first_token_at is None:
+            # A chunk has arrived
+            first_token_at = time.time()
+        # Count tokens in this chunk (sum across request outputs)
+        for out in req_out.outputs:
+            total_new_tokens += len(out.token_ids_delta or [])
 
-    t1 = time.time()
-    outputs = llm.generate(prompts, sampling)
-    gen_time = time.time() - t1
-    total_tokens = sum(len(o.outputs[0].token_ids) for o in outputs)
-    throughput = total_tokens / gen_time if gen_time > 0 else 0.0
+    t_end = time.time()
 
-    # --- Minimal opt-in accuracy harness (substring EM)
-    # Accept either:
-    #  - dataset = [{"prompt": "...", "answer_substr": "..."}]
-    #  - dataset = path to a JSONL with those fields
-    accuracy = None
-    if dataset:
-        def _load_ds(ds):
-            if isinstance(ds, list): return ds
-            p = pathlib.Path(str(ds))
-            if p.exists():
-                return [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
-            return []
-        eval_recs = _load_ds(dataset)[:32]  # small, fast sanity-check eval
-        if eval_recs:
-            eval_prompts = [r["prompt"] for r in eval_recs]
-            eval_outs = llm.generate(eval_prompts, SamplingParams(temperature=0.0, max_tokens=64))
-            hits = 0
-            for r, out in zip(eval_recs, eval_outs):
-                text = out.outputs[0].text
-                if r.get("answer_substr") and r["answer_substr"].lower() in text.lower():
-                    hits += 1
-            accuracy = hits / len(eval_recs)
+    # Metrics
+    ttft_s = (first_token_at - t_start) if first_token_at else 0.0
+    gen_time = (t_end - (first_token_at or t_start))
+    throughput = (total_new_tokens / gen_time) if gen_time > 0 and total_new_tokens else 0.0
 
     metrics = {
         "model": model_name,
-        "config": cfg,
+        "config": cfg | {
+            "batch_size": batch_size,
+            "tensor_parallel": tp,
+            "quantization": quant,
+            "input_tokens": input_tokens,
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+        },
         "throughput_tok_s": throughput,
-        "ttft_s": ttft,
-        "accuracy": accuracy,
+        "ttft_s": ttft_s,
+        "accuracy": None,
         "timestamp": datetime.utcnow().isoformat() + "Z",
+        # "model_load_s": init_time,  # Optional: keep for debugging
     }
     print(json.dumps({"event": "metrics", "data": metrics}))
     return metrics

@@ -12,22 +12,26 @@ RunState = Literal[
 class Sweep(BaseModel):
     batch_size: Optional[List[int]] = None
     tensor_parallel: Optional[List[int]] = None
-    quantization: Optional[List[str]] = None
+    quantization: Optional[List[str]] = None  # keep for vLLM (e.g., awq)
+    # NEW for TRT-LLM:
+    dtype: Optional[List[str]] = None          # ["fp8","fp4","bf16"]
+    lookahead: Optional[List[int]] = None      # [0,4,8]
+    max_new_tokens: Optional[List[int]] = None
     extra: Dict[str, List[Any]] = Field(default_factory=dict)
-
 
 class JobSpec(BaseModel):
     job_name: str
-    model: str
+    model: str                                  # e.g., "Qwen/Qwen2.5-Coder-14B"
     gpu_pool: Literal["A100-80GB","H100","H200","B200"]
-    engine: Literal["vllm"] = "vllm" # MVP scope
+    engine: Literal["vllm","trtllm"] = "vllm"
     dataset: Optional[str] = None
     base_env: Dict[str, str] = Field(default_factory=dict)
     sweep: Sweep
     strategy: Literal["grid","random"] = "grid"
     random_trials: Optional[int] = None
-    num_gpus: int = 1
-    timeout_s: Optional[int] = 3600
+    num_gpus: int = 1                           # tp for trtllm uses this
+    timeout_s: int = 1800
+
 
 
 class Run(BaseModel):
@@ -50,3 +54,4 @@ class Metrics(BaseModel):
     ttft_s: float
     accuracy: Optional[float] = None
     timestamp: datetime
+

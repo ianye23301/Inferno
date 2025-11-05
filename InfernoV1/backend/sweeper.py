@@ -3,17 +3,21 @@ import random
 from typing import Dict, Any, List
 from models import Sweep
 
-
-
-
+# sweeps.py (your snippet area)
 def _axes_from_sweep(s: Sweep) -> Dict[str, List[Any]]:
-    axes = {k:v for k,v in {
-    "batch_size": s.batch_size,
-    "tensor_parallel": s.tensor_parallel,
-    "quantization": s.quantization,
-    **(s.extra or {})
+    axes = {k: v for k, v in {
+        "batch_size": s.batch_size,
+        "tensor_parallel": s.tensor_parallel,
+        "quantization": s.quantization,
+        # NEW axes:
+        "input_tokens": s.input_tokens,
+        "max_new_tokens": s.max_new_tokens,
+        "dtype": s.dtype,
+        "lookahead": s.lookahead,
+        **(s.extra or {})
     }.items() if v}
     return axes
+
 
 
 def grid_points(s: Sweep) -> List[Dict[str, Any]]:
@@ -22,8 +26,6 @@ def grid_points(s: Sweep) -> List[Dict[str, Any]]:
         return [{}]
     keys, vals = zip(*axes.items())
     return [dict(zip(keys, comb)) for comb in product(*vals)]
-
-
 
 
 def random_points(s: Sweep, n: int | None) -> List[Dict[str, Any]]:
