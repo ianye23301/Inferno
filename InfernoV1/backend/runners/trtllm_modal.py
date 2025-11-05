@@ -18,11 +18,13 @@ image = (
     .pip_install("nvidia-ml-py")
     .env({"PIP_CONSTRAINT": ""})
     .run_commands(
+        # Follow official docs exactly
         "git lfs install",
         "git clone https://github.com/NVIDIA/TensorRT-LLM.git /tmp/trt-llm",
-        "cd /tmp/trt-llm && git checkout main",
+        "cd /tmp/trt-llm && git submodule update --init --recursive",  # ADDED THIS
         "cd /tmp/trt-llm && git lfs pull",
-        # Use precompiled - downloads the right version automatically
+        
+        # Use precompiled version (no compilation)
         "cd /tmp/trt-llm && TRTLLM_USE_PRECOMPILED=1 pip install .",
     )
 )
