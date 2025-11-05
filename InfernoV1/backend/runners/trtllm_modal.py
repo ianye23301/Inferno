@@ -20,9 +20,9 @@ image = (
         "openmpi-bin",
         "libopenmpi-dev",
     )
-    # Ensure no rogue 'cuda' package
+    # ensure no rogue 'cuda' package
     .run_commands("python -m pip uninstall -y cuda || true")
-    # Core wheels
+    # core wheels
     .pip_install(
         "numpy==1.26.4",
         "transformers==4.45.2",
@@ -30,20 +30,15 @@ image = (
         "torch==2.4.0",
         "mpi4py==3.1.6",
     )
-    # Install cuda-python and TensorRT-LLM from NVIDIA index
+    # NVIDIA wheels
     .run_commands(
         "python -m pip install --extra-index-url https://pypi.nvidia.com "
         "cuda-python==12.6.0 tensorrt-llm==0.20.0"
     )
-    # Optional: tools repo
     .run_commands("git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM /opt/TensorRT-LLM")
-    # Simple smoke test (NO heredoc)
+    # 🔒 safe smoke test (pure import — no driver needed)
     .run_commands(
-        'python -c "'
-        'from cuda import cuda, cudart; '
-        'import tensorrt_llm, sys; '
-        'print(\'cuda-python OK\', bool(cuda)); '
-        'print(\'tensorrt-llm\', tensorrt_llm.__version__)"'
+        'python -c "from cuda import cuda, cudart; print(\'cuda-python import OK\')"'
     )
     .env({
         "TOKENIZERS_PARALLELISM": "false",
@@ -54,6 +49,16 @@ image = (
         "PYTHONNOUSERSITE": "1",
     })
 )
+@app.function(image=image, gpu="B200", timeout=60*10)
+def _sanity_runtime():
+    # Runs on a GPU worker → has libcuda.so.1
+    from cuda import cudart
+    import tensorrt_llm
+    # optional: touch the driver to verify
+    err, ndev = cudart.cudaGetDeviceCount()
+    if err != 0 or ndev < 1:
+        raise RuntimeError(f"CUDA device not available: err={err}, ndev={ndev}")
+    return {"tensorrt_llm": tensorrt_llm.__version__, "devices": ndev}
 
 
 def _mk_prompt(base_tokens: int) -> str:
@@ -72,6 +77,8 @@ def _engine_tag(model: str, dtype: str, tp: int, lookahead: int, max_seq: int) -
              volumes={"/engines": vol}, timeout=60*30)
              
 def _ensure_engine(args) -> str:
+    _ = _sanity_runtime.call()
+
     args = _coerce_args(args)
     import subprocess, os
     model = args.get("model", "Qwen/Qwen2.5-Coder-14B")
