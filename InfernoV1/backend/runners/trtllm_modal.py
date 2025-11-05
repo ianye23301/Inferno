@@ -46,7 +46,9 @@ def _engine_tag(model: str, dtype: str, tp: int, lookahead: int, max_seq: int) -
 
 @app.function(image=image, gpu="B200", secrets=[modal.Secret.from_name(HF_SECRET_NAME)],
              volumes={"/engines": vol}, timeout=60*30)
-def _ensure_engine(args: Dict[str, Any]) -> str:
+             
+def _ensure_engine(args) -> str:
+    args = _coerce_args(args)
     import subprocess, os
     model = args.get("model", "Qwen/Qwen2.5-Coder-14B")
     dtype = args.get("dtype", "fp8")
@@ -183,6 +185,7 @@ def _coerce_args(args):
 # --- Modal entrypoints per pool to match your CLI map ---
 @app.function(image=image, gpu="B200", secrets=[modal.Secret.from_name(HF_SECRET_NAME)],
              volumes={"/engines": vol}, timeout=60*30)
-def bench_b200(args: Dict[str, Any]) -> None:
+def bench_b200(args):
+    args = _coerce_args(args)
     res = _bench_impl(args)
     print(json.dumps({"event":"metrics","data":res}))
