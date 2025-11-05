@@ -124,21 +124,25 @@ def _ensure_engine(args) -> str:
         "trtllm-build",
         "--checkpoint_dir", str(ckpt_dir),
         "--output_dir", str(engine_dir),
-        "--tp_size", str(tp),
-        "--pp_size", "1",
         "--max_seq_len", str(max_seq),
-        "--use_paged_context_fmha",
-        "--enable_context_fmha",
-        "--enable_chunked_context",
+        "--gpt_attention_plugin", "auto",
+        "--gemm_plugin", "auto",
+        "--context_fmha", "enable",
+        "--use_paged_context_fmha", "enable",
+        "--remove_input_padding", "enable",
     ]
+
+    # Apply FP8 quantization if requested
     if dtype == "fp8":
-       build += [
-           "--strongly_typed",
-           "--use_fp8",
-           "--fp8_kv_cache",
-       ]
+        build += [
+            "--strongly_typed",
+            "--gemm_plugin", "fp8",
+            "--gpt_attention_plugin", "fp8",
+        ]
+
     if lookahead > 0:
         build += ["--lookahead_max_steps", str(lookahead)]
+
     subprocess.check_call(build)
     return str(engine_dir)
 
