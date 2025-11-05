@@ -33,7 +33,7 @@ image = (
     # NVIDIA wheels
     .run_commands(
         "python -m pip install --extra-index-url https://pypi.nvidia.com "
-        "cuda-python==12.6.0 tensorrt-llm==0.20.0"
+        "cuda-python==12.6.0 tensorrt-llm==0.21.0"
     )
     .run_commands("git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM /opt/TensorRT-LLM")
     # 🔒 safe smoke test (pure import — no driver needed)
@@ -100,7 +100,7 @@ def _ensure_engine(args) -> str:
 
     # Convert HF -> TRT-LLM
     conv = [
-        "python", "/opt/TensorRT-LLM/examples/llama/convert_checkpoint.py",
+        "python", "/opt/TensorRT-LLM/examples/qwen/convert_checkpoint.py",
         "--model_dir", model,
         "--output_dir", str(ckpt_dir),
         "--dtype", dtype,
@@ -129,7 +129,12 @@ def _ensure_engine(args) -> str:
     return str(engine_dir)
 
 def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
-    from tensorrt_llm.runtime import ModelRunner, KvCacheConfig, LookaheadDecodingConfig, SamplingConfig
+    from tensorrt_llm.runtime import (
+        ModelRunner,
+        KvCacheConfig,
+        LookaheadDecodingConfig,
+        SamplingConfig,
+    )
     from transformers import AutoTokenizer
     model = args.get("model", "Qwen/Qwen2.5-Coder-14B")
     dtype = args.get("dtype", "fp8")
@@ -156,7 +161,8 @@ def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
     # simple chat wrapper
     sys = "You are Qwen2.5-Coder. Return only code unless asked."
     text = f"<|im_start|>system\n{sys}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
-    input_ids = tok(text, return_tensors="pt").input_ids.cuda()
+    enc = tok(text, add_special_tokens=True)
+    input_ids = enc["input_ids"]  # list[int] is fine for TRT-LLM
 
     samp = SamplingConfig(temperature=temperature, top_p=top_p, max_new_tokens=max_new_tokens)
 
@@ -167,7 +173,7 @@ def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
         if it_first is None and out.text_delta:
             it_first = time.perf_counter()
         if out.text_delta:
-            tokens += tok(out.text_delta, add_special_tokens=False, return_tensors="pt").input_ids.shape[-1]
+            tokens += len(tok(out.text_delta, add_special_tokens=False)["input_ids"])
     t1 = time.perf_counter()
 
     ttft_s = (it_first - t0) if it_first else 0.0
