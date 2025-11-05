@@ -46,11 +46,10 @@ def _coerce_args(args):
     volumes={"/engines": vol}, 
     timeout=60*30
 )
-def bench_b200(args=None):  # Add default None
+def bench_b200(args=None):
     """Simple benchmark using LLM API"""
     from tensorrt_llm import LLM, SamplingParams, BuildConfig
     
-    # Coerce args to dict
     args = _coerce_args(args) if args is not None else {}
     
     model = args.get("model", "Qwen/Qwen2.5-Coder-14B")
@@ -70,17 +69,18 @@ def bench_b200(args=None):  # Add default None
     # Enable optimizations
     build_config.plugin_config.use_paged_context_fmha = True
     
-    # FP8 quantization
+    # FP8 quantization - just pass "fp8" directly to LLM
+    # In TensorRT-LLM 1.0, quantization is handled automatically
     if dtype == "fp8":
-        from tensorrt_llm import QuantConfig, QuantAlgo
-        quant_config = QuantConfig(quant_algo=QuantAlgo.FP8)
-        dtype = "float16"  # base dtype
+        llm_dtype = "fp8"  # LLM API handles FP8 automatically
+    else:
+        llm_dtype = dtype
     
     # LLM API handles engine building and caching automatically
     llm = LLM(
         model=model,
         tensor_parallel_size=tp,
-        dtype=dtype,
+        dtype=llm_dtype,
         build_config=build_config,
     )
     
@@ -102,7 +102,7 @@ def bench_b200(args=None):  # Add default None
         "model": model,
         "gpu": "B200",
         "config": {
-            "dtype": args.get("dtype", "float16"),
+            "dtype": dtype,  # Use original dtype from args
             "tensor_parallel": tp,
             "max_seq_len": max_seq,
             "max_new_tokens": max_new_tokens,
