@@ -17,6 +17,10 @@ class Sweep(BaseModel):
     dtype: Optional[List[str]] = None          # ["fp8","fp4","bf16"]
     lookahead: Optional[List[int]] = None      # [0,4,8]
     max_new_tokens: Optional[List[int]] = None
+    input_tokens: Optional[List[int]] = None   # NEW
+    max_seq_len: Optional[List[int]] = None    # NEW
+    temperature: Optional[List[float]] = None  # NEW
+    top_p: Optional[List[float]] = None        # NEW
     extra: Dict[str, List[Any]] = Field(default_factory=dict)
 
 class JobSpec(BaseModel):
@@ -51,7 +55,7 @@ class Metrics(BaseModel):
     gpu: str
     config: Dict[str, Any]
     throughput_tok_s: float
-    ttft_s: float
+    ttft_s: Optional[float] = None
     accuracy: Optional[float] = None
     timestamp: datetime
 
