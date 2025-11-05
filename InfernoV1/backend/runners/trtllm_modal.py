@@ -14,19 +14,36 @@ vol = modal.Volume.from_name(ENGINE_VOL, create_if_missing=True)
 
 image = (
     modal.Image.from_registry("nvidia/cuda:12.6.2-cudnn-runtime-ubuntu22.04", add_python="3.10")
-    .apt_install("git", "wget")
-    # Base deps first (torch wheel has cu121 tag; works fine here)
+    .apt_install(
+        "git",
+        "wget",
+        "openmpi-bin",        # MPI runtime binaries
+        "libopenmpi-dev",     # Development headers for mpi4py compilation
+    )
+    # Base deps
     .pip_install(
         "numpy==1.26.4",
         "transformers==4.45.2",
         "huggingface_hub>=0.24.0",
         "torch==2.4.0",
     )
-    # ✅ Use a plain string; NO brackets/lists
-    .run_commands("python -m pip install --extra-index-url https://pypi.nvidia.com tensorrt-llm==0.20.0")
+    # Install mpi4py AFTER openmpi is available
+    .pip_install("mpi4py==3.1.6")
+    # TRT-LLM from NVIDIA index
+    .run_commands(
+        "python -m pip install --extra-index-url https://pypi.nvidia.com tensorrt-llm==0.20.0"
+    )
     .run_commands("git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM /opt/TensorRT-LLM")
-    .env({"TOKENIZERS_PARALLELISM": "false", "NCCL_P2P_DISABLE": "1"})
+    .env({
+        "TOKENIZERS_PARALLELISM": "false",
+        "NCCL_P2P_DISABLE": "1",
+        "OMPI_ALLOW_RUN_AS_ROOT": "1",
+        "OMPI_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
+        # Ensure MPI libraries are in the loader path
+        "LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu/openmpi/lib:/usr/local/lib:${LD_LIBRARY_PATH}",
+    })
 )
+
 
 def _mk_prompt(base_tokens: int) -> str:
     base = ("Generate a runnable Python terminal game with a main() and replay loop. "

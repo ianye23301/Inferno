@@ -11,34 +11,25 @@ HF_SECRET_NAME = "hf-token"  # Secret must define HUGGINGFACE_HUB_TOKEN or HF_TO
 app = modal.App(APP_NAME)
 
 image = (
-    modal.Image.from_registry("nvidia/cuda:12.6.2-cudnn-runtime-ubuntu22.04", add_python="3.10")
-    .apt_install(
-        "git",
-        "wget",
-        "openmpi-bin",        # MPI runtime binaries
-        "libopenmpi-dev",     # Development headers for mpi4py compilation
+    modal.Image.from_registry(
+        "nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04",
+        add_python="3.10",
     )
-    # Base deps
+    .pip_install("numpy==1.26.4")  # keep <2 to dodge ABI drama
     .pip_install(
-        "numpy==1.26.4",
+        # ✅ Match vLLM 0.6.2's exact requirement:
+        "torch==2.4.0",               # cu121 wheel
+        "vllm==0.6.2",
         "transformers==4.45.2",
+        "accelerate==1.11.0",
+        "pillow<11",
         "huggingface_hub>=0.24.0",
-        "torch==2.4.0",
+        "ray==2.51.1",
     )
-    # Install mpi4py AFTER openmpi is available
-    .pip_install("mpi4py==3.1.6")
-    # TRT-LLM from NVIDIA index
-    .run_commands(
-        "python -m pip install --extra-index-url https://pypi.nvidia.com tensorrt-llm==0.20.0"
-    )
-    .run_commands("git clone --depth 1 https://github.com/NVIDIA/TensorRT-LLM /opt/TensorRT-LLM")
     .env({
-        "TOKENIZERS_PARALLELISM": "false",
-        "NCCL_P2P_DISABLE": "1",
-        "OMPI_ALLOW_RUN_AS_ROOT": "1",
-        "OMPI_ALLOW_RUN_AS_ROOT_CONFIRM": "1",
-        # Ensure MPI libraries are in the loader path
-        "LD_LIBRARY_PATH": "/usr/lib/x86_64-linux-gnu/openmpi/lib:/usr/local/lib:${LD_LIBRARY_PATH}",
+        "TRANSFORMERS_NO_TF": "1",
+        "TF_CPP_MIN_LOG_LEVEL": "3",
+        "PYTHONNOUSERSITE": "1",
     })
 )
 
