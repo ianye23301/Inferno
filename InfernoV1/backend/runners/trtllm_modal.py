@@ -45,17 +45,6 @@ image = (
     })
 )
 
-def _to_runner_batch(x):
-    import torch
-    if isinstance(x, torch.Tensor):
-        return [x]
-    if isinstance(x, (list, tuple)) and (len(x) and isinstance(x[0], int)):
-        return [torch.tensor(x, dtype=torch.int32)]
-    # already batched?
-    if isinstance(x, (list, tuple)) and x and isinstance(x[0], torch.Tensor):
-        return x
-    raise TypeError("Unsupported input_ids format")
-
 @lru_cache(maxsize=1)
 def _trtllm_supported_flags() -> set[str]:
     try:
@@ -244,6 +233,18 @@ def _ensure_engine(args) -> str:
     print(f"[ensure_engine] Engine ready at {engine_dir}")
     return str(engine_dir)
 
+
+def _to_runner_batch(x):
+    import torch
+    if isinstance(x, torch.Tensor):
+        return [x]
+    if isinstance(x, (list, tuple)) and (len(x) and isinstance(x[0], int)):
+        return [torch.tensor(x, dtype=torch.int32)]
+    # already batched?
+    if isinstance(x, (list, tuple)) and x and isinstance(x[0], torch.Tensor):
+        return x
+    raise TypeError("Unsupported input_ids format")
+
 def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
     from tensorrt_llm.runtime import ModelRunner, SamplingConfig
     from transformers import AutoTokenizer
@@ -264,6 +265,7 @@ def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
         "model": model, "dtype": dtype, "tensor_parallel": tp,
         "lookahead": 0, "max_seq_len": max_seq
     })
+    runner = ModelRunner.from_dir(engine_dir)
 
     tok = AutoTokenizer.from_pretrained(model, trust_remote_code=True, use_fast=True)
 
