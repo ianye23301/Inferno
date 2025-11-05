@@ -8,8 +8,9 @@ ENGINE_VOL = "trtllm-engines"
 app = modal.App(APP_NAME)
 vol = modal.Volume.from_name(ENGINE_VOL, create_if_missing=True)
 
-image = modal.Image.from_registry("nvcr.io/nvidia/tensorrt-llm/release:1.2.0rc1")
-
+image = modal.Image.from_registry(
+    "nvcr.io/nvidia/tensorrt-llm/release:1.0.0"  # Older stable version
+)
 def _coerce_args(args):
     if isinstance(args, dict): return args
     if isinstance(args, list) and args and isinstance(args[0], dict): return args[0]
