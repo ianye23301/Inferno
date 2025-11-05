@@ -103,7 +103,7 @@ def _ensure_engine(args) -> str:
         "python", "/opt/TensorRT-LLM/examples/models/core/qwen/convert_checkpoint.py",
         "--model_dir", model,
         "--output_dir", str(ckpt_dir),
-        "--dtype", dtype,
+        "--dtype", "bfloat16",
         "--use_parallel_embedding",
     ]
     subprocess.check_call(conv, env=env)
@@ -122,7 +122,11 @@ def _ensure_engine(args) -> str:
         "--enable_chunked_context",
     ]
     if dtype == "fp8":
-        build += ["--use_fp8", "--use_fp8_kv_cache"]
+       build += [
+           "--strongly_typed",
+           "--use_fp8",
+           "--fp8_kv_cache",
+       ]
     if lookahead > 0:
         build += ["--lookahead_max_steps", str(lookahead)]
     subprocess.check_call(build)
