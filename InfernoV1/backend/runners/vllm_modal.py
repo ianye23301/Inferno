@@ -3,6 +3,8 @@ from __future__ import annotations
 import json, time, os
 from datetime import datetime
 import modal
+from modal import gpu as mgpu
+
 
 APP_NAME = "inferno-vllm-bench-mock"
 HF_SECRET_NAME = "hf-token"  # Secret must define HUGGINGFACE_HUB_TOKEN or HF_TOKEN
@@ -100,21 +102,37 @@ def env_check():
     # Verify token + model access (adjust model if you use a different one)
     _check_hf_access("meta-llama/Llama-3.1-8B-Instruct")
 
-@app.function(image=image, gpu="A100", timeout=60*30, secrets=[HF_SECRET])
-def bench_a100(args):
-    return _bench_impl(args)
-
+# --- H100 variants ---
 @app.function(image=image, gpu="H100", timeout=60*30, secrets=[HF_SECRET])
-def bench_h100(args):
-    return _bench_impl(args)
+def bench_h100(args): return _bench_impl(args)
 
+@app.function(image=image, gpu=mgpu.H100(count=2), timeout=60*30, secrets=[HF_SECRET])
+def bench_h100x2(args): return _bench_impl(args)
+
+@app.function(image=image, gpu=mgpu.H100(count=4), timeout=60*30, secrets=[HF_SECRET])
+def bench_h100x4(args): return _bench_impl(args)
+
+# --- H200 variants ---
 @app.function(image=image, gpu="H200", timeout=60*30, secrets=[HF_SECRET])
-def bench_h200(args):
-    return _bench_impl(args)
+def bench_h200(args): return _bench_impl(args)
 
+@app.function(image=image, gpu=mgpu.H200(count=2), timeout=60*30, secrets=[HF_SECRET])
+def bench_h200x2(args): return _bench_impl(args)
+
+# --- B200 variants ---
 @app.function(image=image, gpu="B200", timeout=60*30, secrets=[HF_SECRET])
-def bench_b200(args):
-    return _bench_impl(args)
+def bench_b200(args): return _bench_impl(args)
+
+@app.function(image=image, gpu=mgpu.B200(count=2), timeout=60*30, secrets=[HF_SECRET])
+def bench_b200x2(args): return _bench_impl(args)
+
+# --- A100-80GB variants ---
+@app.function(image=image, gpu="A100", timeout=60*30, secrets=[HF_SECRET])
+def bench_a100(args): return _bench_impl(args)
+
+@app.function(image=image, gpu=mgpu.A100(count=2, memory="80GB"), timeout=60*30, secrets=[HF_SECRET])
+def bench_a100x2(args): return _bench_impl(args)
+
     
 def _bench_impl(args):
     os.environ.setdefault("TRANSFORMERS_NO_TF", "1")
@@ -126,11 +144,10 @@ def _bench_impl(args):
 
     args = _coerce_args(args)
     model_name = args.get("model", "meta-llama/Llama-3.1-8B-Instruct")
-    cfg        = args.get("config", {})
+    cfg        = args.get("config", {}) or {}
     run_env    = args.get("env", {}) or {}
-    dataset    = args.get("dataset")  # e.g., path or inline spec
+    num_gpus   = int(args.get("num_gpus", 1))
 
-    # -- apply per-run env injection
     for k, v in run_env.items():
         os.environ[str(k)] = str(v)
 
@@ -138,22 +155,38 @@ def _bench_impl(args):
     tp         = int(cfg.get("tensor_parallel", 1))
     quant      = cfg.get("quantization", "none")
 
-    tok = _get_hf_token()
-    _ = cached_file(model_name, "config.json", token=tok)
+    # Verify the container has the requested GPU count (sanity check).
+    try:
+        import torch
+        vis = torch.cuda.device_count()
+        if vis != num_gpus:
+            print(f"[inferno] WARNING: container sees {vis} GPUs but num_gpus={num_gpus}. Proceeding.")
+    except Exception as _:
+        pass
 
-    prompts  = ["The quick brown fox jumps over the lazy dog."] * batch_size
-    sampling = SamplingParams(temperature=0.8, max_tokens=64)
+    # Backend selection: mp for 1 GPU, ray for >1 GPUs
+    if num_gpus <= 1:
+        os.environ["VLLM_USE_RAY"] = "0"
+        dist_backend = "mp"
+        # Keep TP=1 on single GPU
+        if tp != 1:
+            print(f"[inferno] For single-GPU container, forcing tensor_parallel=1 (was {tp}).")
+            tp = 1
+    else:
+        # multi-GPU: use ray (default). Ensure env doesn’t force-disable it.
+        os.environ.pop("VLLM_USE_RAY", None)
+        dist_backend = "ray"
 
-    # Build LLM kwargs with optional quantization
     llm_kwargs = dict(
         model=model_name,
         tensor_parallel_size=tp,
+        distributed_executor_backend=dist_backend,
         download_dir=os.environ.get("HF_HOME", "/root/.cache/huggingface"),
         trust_remote_code=False,
+        # If chunked prefill causes issues, uncomment:
+        # enable_chunked_prefill=False,
     )
     if quant and quant != "none":
-        # vLLM supports quantization config by name for compatible checkpoints.
-        # If not supported for the chosen model, this will raise (surface in logs).
         llm_kwargs["quantization"] = quant
 
     t0  = time.time()

@@ -34,14 +34,25 @@ class ModalDriver:
         metrics_path = folder/"metrics.json"
 
         gpu_pool = spec.get("gpu_pool", "H100")
-        fn_by_pool = {
-            "A100-80GB": "bench_a100",
-            "H100":      "bench_h100",
-            "H200":      "bench_h200",
-            "B200":      "bench_b200",
+        fn_by_pool_and_count = {
+            ("H100", 1): "bench_h100",
+            ("H100", 2): "bench_h100x2",
+            ("H100", 4): "bench_h100x4",
+            ("H200", 1): "bench_h200",
+            ("H200", 2): "bench_h200x2",
+            ("B200", 1): "bench_b200",
+            ("B200", 2): "bench_b200x2",
+            ("A100-80GB", 1): "bench_a100",
+            ("A100-80GB", 2): "bench_a100x2",
         }
-        fn = fn_by_pool.get(gpu_pool, "bench_h100")
-
+        gpu_pool = spec.get("gpu_pool", "H100")
+        num_gpus = int(spec.get("num_gpus", 1))
+        fn = fn_by_pool_and_count.get((gpu_pool, num_gpus))
+        if not fn:
+            raise RuntimeError(
+                f"No Modal function defined for pool={gpu_pool} with num_gpus={num_gpus}. "
+                f"Available: {sorted(set(k for k in fn_by_pool_and_count.keys() if k[0]==gpu_pool))}"
+            )        
         # Use --args with JSON string (no temp file needed)
         cmd = [
             "modal", "run", "-m",

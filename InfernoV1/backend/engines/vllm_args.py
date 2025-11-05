@@ -5,9 +5,8 @@ def build_modal_payload(spec: Dict[str, Any], config: Dict[str, Any]) -> Dict[st
     return {
         "model": spec.get("model"),
         "gpu_pool": spec.get("gpu_pool"),
+        "num_gpus": int(spec.get("num_gpus", 1)),   # NEW
         "config": config,
-        # NEW: propagate base_env for per-run env injection
         "env": spec.get("base_env", {}),
-        # Optional: pass dataset through so the runner can compute accuracy
         "dataset": spec.get("dataset"),
     }

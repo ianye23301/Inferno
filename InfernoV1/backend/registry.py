@@ -179,3 +179,26 @@ def set_paths(run_id: str, paths: Dict[str, str]) -> None:
             c.execute("UPDATE runs SET metrics_path=? WHERE run_id=?", (metrics, run_id))
         elif logs:
             c.execute("UPDATE runs SET logs_path=? WHERE run_id=?", (logs, run_id))
+
+
+
+def iter_job_metrics(job_name: str):
+    """Yield (row, metrics_dict) for runs in this job that have metrics.json."""
+    rows = list_runs_by_job(job_name)
+    for r in rows:
+        mp = r.get("metrics_path")
+        if not mp:
+            # fall back to standard location if not yet set
+            mp = str((RUNS_DIR / r["run_id"] / "metrics.json").resolve())
+        if mp and os.path.exists(mp):
+            try:
+                yield r, json.loads(Path(mp).read_text())
+            except Exception:
+                continue
+
+def write_job_best(job_name: str, metric: str, best_payload: dict) -> str:
+    job_dir = JOBS_DIR / job_name
+    job_dir.mkdir(parents=True, exist_ok=True)
+    out = job_dir / f"best_{metric}.json"
+    out.write_text(json.dumps(best_payload, indent=2))
+    return str(out)
