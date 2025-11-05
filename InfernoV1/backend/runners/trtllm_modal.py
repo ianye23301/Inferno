@@ -59,6 +59,8 @@ def bench_b200(args=None):
     max_new_tokens = args.get("max_new_tokens", 512)
     temperature = args.get("temperature", 0.8)
     top_p = args.get("top_p", 0.95)
+    batch_size = args.get("batch_size", 1)  # FIXED: Now extracted
+    input_tokens = args.get("input_tokens", 128)  # FIXED: Now extracted
     
     # Build config for engine optimization
     build_config = BuildConfig(
@@ -84,33 +86,50 @@ def bench_b200(args=None):
         build_config=build_config,
     )
     
-    prompt = "Generate a Python function to calculate fibonacci numbers."
+    # FIXED: Generate prompt of specified input length
+    # Approximate tokens (rough: 1 token ≈ 4 chars)
+    prompt_text = "Generate a Python function to calculate fibonacci numbers. " * (input_tokens // 10)
+    
     sampling = SamplingParams(
         temperature=temperature,
         top_p=top_p,
         max_tokens=max_new_tokens
     )
     
+    # FIXED: Support batch_size > 1
+    prompts = [prompt_text] * batch_size
+    
     t0 = time.perf_counter()
-    outputs = llm.generate([prompt], sampling)
+    outputs = llm.generate(prompts, sampling)
     t1 = time.perf_counter()
     
-    tokens = len(outputs[0].outputs[0].token_ids)
+    # FIXED: Aggregate metrics across batch
+    total_tokens = sum(len(out.outputs[0].token_ids) for out in outputs)
     elapsed = t1 - t0
+    
+    # FIXED: Calculate TTFT (time to first token) if available
+    ttft_s = None
+    if hasattr(outputs[0].outputs[0], 'ttft'):
+        ttft_s = outputs[0].outputs[0].ttft
     
     result = {
         "model": model,
         "gpu": "B200",
         "config": {
-            "dtype": dtype,  # Use original dtype from args
+            "dtype": dtype,
             "tensor_parallel": tp,
             "max_seq_len": max_seq,
             "max_new_tokens": max_new_tokens,
+            "batch_size": batch_size,  # FIXED: Now recorded
+            "input_tokens": input_tokens,  # FIXED: Now recorded
+            "temperature": temperature,
+            "top_p": top_p,
         },
         "metrics": {
-            "tokens_generated": tokens,
+            "tokens_generated": total_tokens,
             "time_s": round(elapsed, 3),
-            "throughput_tok_s": round(tokens / elapsed, 2) if elapsed > 0 else 0,
+            "throughput_tok_s": round(total_tokens / elapsed, 2) if elapsed > 0 else 0,
+            "ttft_s": round(ttft_s, 4) if ttft_s else None,  # FIXED: Include TTFT
         },
         "timestamp": time.time(),
     }
