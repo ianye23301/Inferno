@@ -206,6 +206,7 @@ def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
     from tensorrt_llm.runtime import ModelRunner, SamplingConfig
     from tensorrt_llm.bindings.executor import KvCacheConfig, LookaheadDecodingConfig
     from transformers import AutoTokenizer
+    import torch
 
     model = args.get("model", "Qwen/Qwen2.5-Coder-14B")
     dtype = args.get("dtype", "fp8")
@@ -232,11 +233,14 @@ def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
     enc = tok(text, add_special_tokens=True)
     input_ids = enc["input_ids"]
 
+    # Convert to torch tensor
+    input_ids_tensor = torch.tensor(input_ids, dtype=torch.int32)
+
     # Get end_id and pad_id from tokenizer
     end_id = tok.eos_token_id if tok.eos_token_id is not None else tok.pad_token_id
     pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
     
-    # Fallback if both are None (shouldn't happen with Qwen but just in case)
+    # Fallback if both are None
     if end_id is None:
         end_id = 151643  # Qwen2.5 default EOS
     if pad_id is None:
@@ -253,7 +257,7 @@ def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
     t0 = time.perf_counter()
     
     outputs = runner.generate(
-        batch_input_ids=[input_ids],
+        batch_input_ids=[input_ids_tensor],  # Pass tensor instead of list
         sampling_config=samp
     )
 
