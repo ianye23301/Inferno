@@ -98,7 +98,6 @@ def _engine_tag(model: str, dtype: str, tp: int, lookahead: int, max_seq: int) -
 
 @app.function(image=image, gpu="B200", secrets=[modal.Secret.from_name(HF_SECRET_NAME)],
              volumes={"/engines": vol}, timeout=60*30)
-             
 def _ensure_engine(args) -> str:
     _ = _sanity_runtime.remote()
 
@@ -112,9 +111,14 @@ def _ensure_engine(args) -> str:
 
     tag = _engine_tag(model, dtype, tp, lookahead, max_seq)
     engine_dir = Path("/engines") / tag
-    if engine_dir.exists() and any(engine_dir.iterdir()):
+    
+    # Check if engine is already built AND valid
+    config_file = engine_dir / "config.json"
+    if config_file.exists():
+        print(f"Engine already exists at {engine_dir}")
         return str(engine_dir)
 
+    # Download model
     from huggingface_hub import snapshot_download
     model_dir = Path("/engines") / "models" / model.replace("/", "_")
     if not model_dir.exists():
@@ -124,6 +128,7 @@ def _ensure_engine(args) -> str:
             local_dir=str(model_dir),
             local_dir_use_symlinks=False,
         )
+    
     ckpt_dir = Path("/engines") / f"{tag}_ckpt"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
@@ -131,18 +136,20 @@ def _ensure_engine(args) -> str:
     env["HF_TOKEN"] = env.get("HF_TOKEN") or env.get("HUGGINGFACE_TOKEN", "")
 
     # Convert HF -> TRT-LLM
+    print(f"Converting checkpoint...")
     conv = [
         "python", "/opt/TensorRT-LLM/examples/models/core/qwen/convert_checkpoint.py",
         "--model_dir", str(model_dir),
         "--output_dir", str(ckpt_dir),
         "--dtype", "bfloat16",
-        "--tp_size", str(tp),  # Add this line
+        "--tp_size", str(tp),
         "--use_parallel_embedding",
     ]
     subprocess.check_call(conv, env=env)
 
     # Build engine
     engine_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Building engine...")
 
     build = [
         "trtllm-build",
@@ -151,7 +158,7 @@ def _ensure_engine(args) -> str:
         "--max_seq_len", str(max_seq),
     ]
 
-    # Optional toggles if present in this TRT-LLM
+    # Optional toggles
     if _has("--context_fmha"):
         build += ["--context_fmha", "enable"]
     if _has("--remove_input_padding"):
@@ -159,49 +166,40 @@ def _ensure_engine(args) -> str:
 
     # Plugins / dtype handling
     if dtype == "fp8":
-        # Prefer modern FP8 GEMM plugin; fall back to low-latency plugin name if that's what this build exposes
         if _has("--gemm_plugin"):
             build += ["--gemm_plugin", "fp8"]
         elif _has("--low_latency_gemm_plugin"):
             build += ["--low_latency_gemm_plugin", "fp8"]
 
-        # Attention path often stays bf16 with FP8 GEMM; only add if flag exists
         if _has("--gpt_attention_plugin"):
             build += ["--gpt_attention_plugin", "bfloat16"]
-        # if _has("--kv_cache_type"):
-        #     build += ["--kv_cache_type", "fp8"]       # builder owns KV dtype
-        # Only append strongly_typed if supported by this version
+        
         if _has("--strongly_typed"):
             build += ["--strongly_typed"]
     else:
-        # Auto plugin selection if supported
         if _has("--gemm_plugin"):
             build += ["--gemm_plugin", "auto"]
         if _has("--gpt_attention_plugin"):
             build += ["--gpt_attention_plugin", "auto"]
 
-    # Lookahead decoding flags differ by version:
+    # Lookahead decoding
     if lookahead and int(lookahead) > 0:
         if _has("--lookahead_max_steps"):
-            # Newer spelling
             build += ["--lookahead_max_steps", str(lookahead)]
         elif _has("--speculative_decoding_mode") and _has("--max_draft_len"):
-            # Older spelling
             build += [
                 "--speculative_decoding_mode", "lookahead_decoding",
                 "--max_draft_len", str(lookahead),
             ]
-        else:
-            # No lookahead support in this TRT-LLM; continue without it
-            pass
 
-    # (Optional) Other common toggles if your build supports them:
-    if _has("--remove_input_padding"):
-        build += ["--remove_input_padding", "enable"]
-    if _has("--norm_quant_fusion"):
-        build += ["--norm_quant_fusion", "enable"]
-
+    print(f"Running: {' '.join(build)}")
     subprocess.check_call(build)
+    
+    # Verify the engine was built successfully
+    if not config_file.exists():
+        raise RuntimeError(f"Engine build failed - config.json not found in {engine_dir}")
+    
+    print(f"Engine built successfully at {engine_dir}")
     return str(engine_dir)
 
 def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
