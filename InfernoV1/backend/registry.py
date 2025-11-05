@@ -2,7 +2,7 @@ import os, json, sqlite3, threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List
-from settings import DB_PATH, RUNS_DIR
+from settings import DB_PATH, RUNS_DIR, JOBS_DIR
 from models import RunState, JobSpec
 
 
