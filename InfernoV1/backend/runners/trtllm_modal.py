@@ -12,15 +12,19 @@ ENGINE_VOL = "trtllm-engines"
 app = modal.App(APP_NAME)
 vol = modal.Volume.from_name(ENGINE_VOL, create_if_missing=True)
 
-# NOTE: We do NOT need torch for TRT-LLM ModelRunner. Removing torch avoids CUDA kernel/arch issues on B200.
 image = (
     modal.Image.from_registry("nvcr.io/nvidia/pytorch:25.03-py3")
-    .apt_install("git", "build-essential", "cmake")
+    .apt_install("git", "git-lfs", "build-essential", "cmake")  # Added git-lfs
     .pip_install("nvidia-ml-py")
     .env({"PIP_CONSTRAINT": ""})  # Disable pip constraints
     .run_commands(
+        # Install git-lfs and clone with LFS support
+        "git lfs install",
         "git clone https://github.com/NVIDIA/TensorRT-LLM.git /tmp/trt-llm",
         "cd /tmp/trt-llm && git checkout main",
+        "cd /tmp/trt-llm && git lfs pull",  # Pull LFS files
+        
+        # Install dependencies and build
         "pip install -r /tmp/trt-llm/requirements.txt",
         "cd /tmp/trt-llm && python scripts/build_wheel.py --clean",
         "pip install /tmp/trt-llm/build/tensorrt_llm*.whl",
