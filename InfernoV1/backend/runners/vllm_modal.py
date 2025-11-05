@@ -227,7 +227,7 @@ _COUNTS_BY_POOL = {
 }
 
 def _register_modal_fn(name: str, gpu_str: str):
-    @app.function(image=image, gpu=gpu_str, timeout=60*30, secrets=[HF_SECRET])
+    @app.function(image=image, gpu=gpu_str, timeout=60*30, secrets=[HF_SECRET], serialized=True)
     def _runner(args):
         return _bench_impl(args)
     _runner.__name__ = name
