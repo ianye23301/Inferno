@@ -125,19 +125,21 @@ def _ensure_engine(args) -> str:
         "--checkpoint_dir", str(ckpt_dir),
         "--output_dir", str(engine_dir),
         "--max_seq_len", str(max_seq),
-        "--gpt_attention_plugin", "auto",
-        "--gemm_plugin", "auto",
         "--context_fmha", "enable",
-        "--use_paged_context_fmha", "enable",
         "--remove_input_padding", "enable",
     ]
 
-    # Apply FP8 quantization if requested
+    # Configure plugins based on dtype
     if dtype == "fp8":
         build += [
             "--strongly_typed",
-            "--gemm_plugin", "fp8",
-            "--gpt_attention_plugin", "fp8",
+            "--gemm_plugin", "fp8",           # FP8 for GEMM
+            "--gpt_attention_plugin", "bfloat16",  # bfloat16 for attention (NOT fp8)
+        ]
+    else:
+        build += [
+            "--gemm_plugin", "auto",
+            "--gpt_attention_plugin", "auto",
         ]
 
     if lookahead > 0:
