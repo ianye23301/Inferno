@@ -49,6 +49,29 @@ image = (
         "PYTHONNOUSERSITE": "1",
     })
 )
+
+import subprocess, shlex, os, json, time
+from functools import lru_cache
+
+@lru_cache(maxsize=1)
+def _trtllm_supported_flags() -> set[str]:
+    try:
+        out = subprocess.run(["trtllm-build", "-h"], check=True, capture_output=True, text=True)
+        text = out.stdout + "\n" + out.stderr
+    except Exception as e:
+        # If help fails, return empty set so we don't add optional flags
+        return set()
+    flags = set()
+    for tok in text.split():
+        if tok.startswith("--"):
+            # normalize commas/newlines
+            flags.add(tok.strip(", "))
+    return flags
+
+def _has(flag: str) -> bool:
+    return flag in _trtllm_supported_flags()
+
+
 @app.function(image=image, gpu="B200", timeout=60*10)
 def _sanity_runtime():
     # Runs on a GPU worker → has libcuda.so.1
@@ -120,30 +143,62 @@ def _ensure_engine(args) -> str:
 
     # Build engine
     engine_dir.mkdir(parents=True, exist_ok=True)
+
     build = [
         "trtllm-build",
         "--checkpoint_dir", str(ckpt_dir),
         "--output_dir", str(engine_dir),
         "--max_seq_len", str(max_seq),
-        "--context_fmha", "enable",
-        "--remove_input_padding", "enable",
     ]
 
-    # Configure plugins based on dtype
-    if dtype == "fp8":
-        build += [
-            "--strongly_typed",
-            "--gemm_plugin", "fp8",           # FP8 for GEMM
-            "--gpt_attention_plugin", "bfloat16",  # bfloat16 for attention (NOT fp8)
-        ]
-    else:
-        build += [
-            "--gemm_plugin", "auto",
-            "--gpt_attention_plugin", "auto",
-        ]
+    # Optional toggles if present in this TRT-LLM
+    if _has("--context_fmha"):
+        build += ["--context_fmha", "enable"]
+    if _has("--remove_input_padding"):
+        build += ["--remove_input_padding", "enable"]
 
-    if lookahead > 0:
-        build += ["--lookahead_max_steps", str(lookahead)]
+    # Plugins / dtype handling
+    if dtype == "fp8":
+        # Prefer modern FP8 GEMM plugin; fall back to low-latency plugin name if that's what this build exposes
+        if _has("--gemm_plugin"):
+            build += ["--gemm_plugin", "fp8"]
+        elif _has("--low_latency_gemm_plugin"):
+            build += ["--low_latency_gemm_plugin", "fp8"]
+
+        # Attention path often stays bf16 with FP8 GEMM; only add if flag exists
+        if _has("--gpt_attention_plugin"):
+            build += ["--gpt_attention_plugin", "bfloat16"]
+
+        # Only append strongly_typed if supported by this version
+        if _has("--strongly_typed"):
+            build += ["--strongly_typed"]
+    else:
+        # Auto plugin selection if supported
+        if _has("--gemm_plugin"):
+            build += ["--gemm_plugin", "auto"]
+        if _has("--gpt_attention_plugin"):
+            build += ["--gpt_attention_plugin", "auto"]
+
+    # Lookahead decoding flags differ by version:
+    if lookahead and int(lookahead) > 0:
+        if _has("--lookahead_max_steps"):
+            # Newer spelling
+            build += ["--lookahead_max_steps", str(lookahead)]
+        elif _has("--speculative_decoding_mode") and _has("--max_draft_len"):
+            # Older spelling
+            build += [
+                "--speculative_decoding_mode", "lookahead_decoding",
+                "--max_draft_len", str(lookahead),
+            ]
+        else:
+            # No lookahead support in this TRT-LLM; continue without it
+            pass
+
+    # (Optional) Other common toggles if your build supports them:
+    if _has("--remove_input_padding"):
+        build += ["--remove_input_padding", "enable"]
+    if _has("--norm_quant_fusion"):
+        build += ["--norm_quant_fusion", "enable"]
 
     subprocess.check_call(build)
     return str(engine_dir)
