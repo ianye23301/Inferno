@@ -77,7 +77,7 @@ def _engine_tag(model: str, dtype: str, tp: int, lookahead: int, max_seq: int) -
              volumes={"/engines": vol}, timeout=60*30)
              
 def _ensure_engine(args) -> str:
-    _ = _sanity_runtime.call()
+    _ = _sanity_runtime.remote()
 
     args = _coerce_args(args)
     import subprocess, os
@@ -132,7 +132,7 @@ def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
     from tensorrt_llm.runtime import ModelRunner, SamplingConfig
     from tensorrt_llm.bindings.executor import KvCacheConfig, LookaheadDecodingConfig
     from transformers import AutoTokenizer
-    
+
     model = args.get("model", "Qwen/Qwen2.5-Coder-14B")
     dtype = args.get("dtype", "fp8")
     tp = int(args.get("tensor_parallel", 1))
@@ -143,7 +143,7 @@ def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
     temperature = float(args.get("temperature", 0.2))
     top_p = float(args.get("top_p", 0.95))
 
-    engine_dir = _ensure_engine.call({
+    engine_dir = _ensure_engine.remote({
         "model": model, "dtype": dtype, "tensor_parallel": tp,
         "lookahead": lookahead, "max_seq_len": max_seq
     })
