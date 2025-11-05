@@ -168,7 +168,8 @@ def _ensure_engine(args) -> str:
         # Attention path often stays bf16 with FP8 GEMM; only add if flag exists
         if _has("--gpt_attention_plugin"):
             build += ["--gpt_attention_plugin", "bfloat16"]
-
+        if _has("--kv_cache_type"):
+            build += ["--kv_cache_type", "fp8"]       # builder owns KV dtype
         # Only append strongly_typed if supported by this version
         if _has("--strongly_typed"):
             build += ["--strongly_typed"]
@@ -205,7 +206,7 @@ def _ensure_engine(args) -> str:
 
 def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
     from tensorrt_llm.runtime import ModelRunner, SamplingConfig
-    from tensorrt_llm.bindings.executor import KvCacheConfig, LookaheadDecodingConfig
+    from tensorrt_llm.bindings.executor import KvCacheConfig, LookaheadDecodingConfig, RuntimeDefaults, KvCacheType
     from transformers import AutoTokenizer
 
     model = args.get("model", "Qwen/Qwen2.5-Coder-14B")
@@ -223,7 +224,12 @@ def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
         "lookahead": lookahead, "max_seq_len": max_seq
     })
     tok = AutoTokenizer.from_pretrained(model, trust_remote_code=True, use_fast=True)
-    kv = KvCacheConfig(fp8_kv_cache=True, enable_block_reuse=True)
+
+    rd = RuntimeDefaults()
+    if hasattr(KvCacheType, "FP8"):
+        rd.kv_cache_type = KvCacheType.FP8
+
+    kv = KvCacheConfig(enable_block_reuse=True, runtime_defaults=rd)
     look = LookaheadDecodingConfig(max_steps=lookahead) if lookahead > 0 else None
     runner = ModelRunner.from_dir(engine_dir, kv_cache_config=kv, lookahead_config=look,
                                   cuda_graph_mode="static", enable_overlap_schedule=True)
