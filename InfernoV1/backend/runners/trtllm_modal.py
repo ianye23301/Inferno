@@ -45,6 +45,17 @@ image = (
     })
 )
 
+def _to_runner_batch(x):
+    import torch
+    if isinstance(x, torch.Tensor):
+        return [x]
+    if isinstance(x, (list, tuple)) and (len(x) and isinstance(x[0], int)):
+        return [torch.tensor(x, dtype=torch.int32)]
+    # already batched?
+    if isinstance(x, (list, tuple)) and x and isinstance(x[0], torch.Tensor):
+        return x
+    raise TypeError("Unsupported input_ids format")
+
 @lru_cache(maxsize=1)
 def _trtllm_supported_flags() -> set[str]:
     try:
@@ -236,6 +247,8 @@ def _ensure_engine(args) -> str:
 def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
     from tensorrt_llm.runtime import ModelRunner, SamplingConfig
     from transformers import AutoTokenizer
+    import torch  # keep it CPU-only
+
 
     model = args.get("model", "Qwen/Qwen2.5-Coder-14B")
     dtype = args.get("dtype", "fp8")
@@ -260,13 +273,17 @@ def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
     text = f"<|im_start|>system\n{sys}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
 
     enc = tok(text, add_special_tokens=True)
-    input_ids = enc["input_ids"]  # Python list[int]; OK for TRT-LLM
+    input_ids = enc["input_ids"]
 
-    # Work around missing pad/eos
+    # TRT-LLM 0.21 expects torch tensors with .size(0); keep them on CPU
+    input_ids_t = torch.tensor(input_ids, dtype=torch.int32)   # int32 is fine
+    batch = _to_runner_batch(input_ids)
+
+    # Ensure end_id / pad_id are set
     end_id = tok.eos_token_id if tok.eos_token_id is not None else tok.pad_token_id
     pad_id = tok.pad_token_id if tok.pad_token_id is not None else end_id
     if end_id is None:
-        end_id = 151643  # Qwen2.5 default EOS (fallback)
+        end_id = 151643  # Qwen2.5 fallback
     if pad_id is None:
         pad_id = end_id
 
@@ -275,19 +292,15 @@ def _bench_impl(args: Dict[str, Any]) -> Dict[str, Any]:
         pad_id=pad_id,
         temperature=temperature,
         top_p=top_p,
-        max_new_tokens=max_new_tokens
+        max_new_tokens=max_new_tokens,
     )
 
-    runner = ModelRunner.from_dir(engine_dir)
-
-    # Measure end-to-end generation
     t0 = time.perf_counter()
     out = runner.generate(
-        batch_input_ids=[input_ids],   # list[list[int]] — no torch tensors
-        sampling_config=samp
+        batch_input_ids=batch,      # list[torch.Tensor], CPU
+        sampling_config=samp,
     )
     t1 = time.perf_counter()
-
     # TRT-LLM typically returns a list of outputs; normalize robustly
     # Expecting shape like: [{'output_ids': [[...]]}, ...] or object with .output_ids
     if isinstance(out, dict):
