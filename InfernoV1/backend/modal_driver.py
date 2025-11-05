@@ -29,22 +29,25 @@ class ModalDriver:
         pass
     
 
+        # --- replace execute_locally_and_collect(...) with this version ---
     def execute_locally_and_collect(self, run_id: str, spec: Dict[str, Any], config: Dict[str, Any]) -> str:
         # Ensure modal CLI exists
         if not shutil.which("modal"):
             raise RuntimeError("Modal CLI not found. Install with `pip install modal` and run `modal token new`.")
 
-        engine = spec.get("engine", "vllm")
+        engine = (spec.get("engine") or "vllm").lower()
 
         folder = RUNS_DIR / run_id
-        logs_path = folder/"logs.txt"
-        metrics_path = folder/"metrics.json"
+        folder.mkdir(parents=True, exist_ok=True)
+        logs_path = folder / "logs.txt"
+        metrics_path = folder / "metrics.json"
 
         if engine == "trtllm":
             payload = build_trtllm_payload(spec, config)
+            # Full module::function strings as values
             fn_by_pool_and_count = {
-                ("B200", 1): ("backend.runners.trtllm_qwen_modal::bench_b200"),
-                # add more pools if you implement them:
+                ("B200", 1): "backend.runners.trtllm_qwen_modal::bench_b200",
+                # Add more as you implement them:
                 # ("H200", 1): "backend.runners.trtllm_qwen_modal::bench_h200",
                 # ("H100", 1): "backend.runners.trtllm_qwen_modal::bench_h100",
                 # ("A100-80GB", 1): "backend.runners.trtllm_qwen_modal::bench_a100",
@@ -62,20 +65,19 @@ class ModalDriver:
                 ("A100-80GB", 1): "backend.runners.vllm_modal::bench_a100",
                 ("A100-80GB", 2): "backend.runners.vllm_modal::bench_a100x2",
             }
-            
+
         gpu_pool = spec.get("gpu_pool", "H100")
         num_gpus = int(spec.get("num_gpus", 1))
         fn = fn_by_pool_and_count.get((gpu_pool, num_gpus))
         if not fn:
-            raise RuntimeError(
-                f"No Modal function defined for pool={gpu_pool} with num_gpus={num_gpus}. "
-                f"Available: {sorted(set(k for k in fn_by_pool_and_count.keys() if k[0]==gpu_pool))}"
-            )        
-        # Use --args with JSON string (no temp file needed)
+            avail = sorted({k for k in fn_by_pool_and_count.keys() if k[0] == gpu_pool})
+            raise RuntimeError(f"No Modal function defined for pool={gpu_pool} with num_gpus={num_gpus}. Available: {avail}")
+
+        # Call exactly the function in `fn`; do NOT prefix it again
         cmd = [
             "modal", "run", "-m",
-            f"backend.runners.vllm_modal::{fn}",
-            "--args", json.dumps([payload]),  # NOTE: wrap in a list!
+            fn,
+            "--args", json.dumps([payload]),   # function receives a single positional arg; we pass [payload]
         ]
 
         log_event("modal_cli_start", run_id=run_id, cmd=" ".join(cmd))
@@ -89,9 +91,11 @@ class ModalDriver:
                 try:
                     obj = json.loads(line.strip())
                     if obj.get("event") == "metrics":
+                        # Expect a unified metrics dict (see runners below)
                         last_metrics = obj.get("data")
                 except Exception:
                     pass
+
         rc = proc.wait()
         log_event("modal_cli_finish", run_id=run_id, returncode=rc)
 
@@ -105,5 +109,6 @@ class ModalDriver:
                 "accuracy": None,
                 "timestamp": None,
             }
+
         metrics_path.write_text(json.dumps(last_metrics, indent=2))
         return str(metrics_path)
