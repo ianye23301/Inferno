@@ -8,14 +8,36 @@ ENGINE_VOL = "trtllm-engines"
 app = modal.App(APP_NAME)
 vol = modal.Volume.from_name(ENGINE_VOL, create_if_missing=True)
 
-image = modal.Image.from_registry(
-    "nvcr.io/nvidia/tensorrt-llm/release:1.0.0"  # Older stable version
-)
+image = modal.Image.from_registry("nvcr.io/nvidia/tensorrt-llm/release:1.0.0")
+
 def _coerce_args(args):
-    if isinstance(args, dict): return args
-    if isinstance(args, list) and args and isinstance(args[0], dict): return args[0]
-    try: return json.loads(args) if isinstance(args, str) else {}
-    except: return {}
+    """Handle args being passed as list, dict, or string"""
+    # If it's already a dict, return it
+    if isinstance(args, dict):
+        return args
+    
+    # If it's a list, check what's inside
+    if isinstance(args, list):
+        if not args:  # Empty list
+            return {}
+        if isinstance(args[0], dict):  # [{}]
+            return args[0]
+        # If list of other things, return empty dict
+        return {}
+    
+    # If it's a string, try to parse JSON
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                return parsed[0]
+        except:
+            pass
+    
+    # Default: return empty dict
+    return {}
 
 @app.function(
     image=image, 
@@ -24,11 +46,12 @@ def _coerce_args(args):
     volumes={"/engines": vol}, 
     timeout=60*30
 )
-def bench_b200(args):
+def bench_b200(args=None):  # Add default None
     """Simple benchmark using LLM API"""
     from tensorrt_llm import LLM, SamplingParams, BuildConfig
     
-    args = _coerce_args(args)
+    # Coerce args to dict
+    args = _coerce_args(args) if args is not None else {}
     
     model = args.get("model", "Qwen/Qwen2.5-Coder-14B")
     dtype = args.get("dtype", "float16")  # "float16", "bfloat16", "fp8"
@@ -79,7 +102,7 @@ def bench_b200(args):
         "model": model,
         "gpu": "B200",
         "config": {
-            "dtype": args.get("dtype"),
+            "dtype": args.get("dtype", "float16"),
             "tensor_parallel": tp,
             "max_seq_len": max_seq,
             "max_new_tokens": max_new_tokens,
