@@ -158,7 +158,6 @@ def _eval_python_code(code: str) -> dict:
 def bench_b200(args=None):
     from tensorrt_llm import LLM, SamplingParams, BuildConfig
     # KvCacheConfig path for TRT-LLM 1.0.0:
-    from tensorrt_llm.bindings.executor import KvCacheConfig
     import time, json, os
     from datetime import datetime
 
@@ -181,7 +180,6 @@ def bench_b200(args=None):
     # Bound KV cache to avoid 100+ GiB allocations.
     # Budget = B * (prompt + generate + headroom)
     max_tokens_budget = batch_size * (input_tokens + max_new_tokens + 128)
-    kv_cfg = KvCacheConfig(enable_block_reuse=True, max_tokens=max_tokens_budget)
 
     llm_dtype = "fp8" if dtype.lower() == "fp8" else dtype
 
@@ -195,7 +193,6 @@ def bench_b200(args=None):
         tensor_parallel_size=tp,
         dtype=llm_dtype,
         build_config=build_config,
-        kv_cache_config=kv_cfg,
     )
 
     prompt_text = "Build a snake game in Python."
