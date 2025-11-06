@@ -148,7 +148,6 @@ def _eval_python_code(code: str) -> dict:
             "completeness": max(0.0, completeness_score - 0.3),  # Penalize but don't zero out
             "traceback": traceback.format_exc()
         }
-        
 @app.function(
     image=image,
     gpu="B200",
@@ -158,6 +157,8 @@ def _eval_python_code(code: str) -> dict:
 )
 def bench_b200(args=None):
     from tensorrt_llm import LLM, SamplingParams, BuildConfig
+    # KvCacheConfig path for TRT-LLM 1.0.0:
+    from tensorrt_llm.bindings.executor import KvCacheConfig
     import time, json, os
     from datetime import datetime
 
@@ -173,8 +174,14 @@ def bench_b200(args=None):
     batch_size = int(args.get("batch_size", 1))
     input_tokens = int(args.get("input_tokens", 128))
 
+    # Build config
     build_config = BuildConfig(max_seq_len=max_seq, strongly_typed=True)
     build_config.plugin_config.use_paged_context_fmha = True
+
+    # Bound KV cache to avoid 100+ GiB allocations.
+    # Budget = B * (prompt + generate + headroom)
+    max_tokens_budget = batch_size * (input_tokens + max_new_tokens + 128)
+    kv_cfg = KvCacheConfig(enable_block_reuse=True, max_tokens=max_tokens_budget)
 
     llm_dtype = "fp8" if dtype.lower() == "fp8" else dtype
 
@@ -188,6 +195,7 @@ def bench_b200(args=None):
         tensor_parallel_size=tp,
         dtype=llm_dtype,
         build_config=build_config,
+        kv_cache_config=kv_cfg,
     )
 
     prompt_text = "Build a snake game in Python."
@@ -199,162 +207,103 @@ def bench_b200(args=None):
         max_tokens=max_new_tokens
     )
 
-    # Track timing and tokens for each request
+    # Tracking
     request_data = {i: {
         "start_time": None,
         "first_token_time": None,
         "end_time": None,
         "tokens": [],
         "text": "",
-        "seen_first_token": False  # NEW: track if we've seen first token
     } for i in range(batch_size)}
-    
+
     total_start = time.perf_counter()
-    
-    # Generate with streaming
-    try:
-        request_idx = 0  # Track which request we're processing
-        for output in llm.generate(prompts, sampling, streaming=True):
-            current_time = time.perf_counter()
-            
-            # Get request_id, with fallback to sequential counter
-            if hasattr(output, 'request_id'):
-                request_id = output.request_id
+
+    # Batch generation (TRT-LLM 1.0.0 returns a list; no streaming)
+    t0 = time.perf_counter()
+    outputs = llm.generate(prompts, sampling)
+    t1 = time.perf_counter()
+
+    # Extract results + first token latency if exposed in metrics
+    for idx, o in enumerate(outputs):
+        request_data[idx]["start_time"] = t0
+        request_data[idx]["end_time"] = t1
+
+        if getattr(o, "outputs", None) and len(o.outputs) > 0:
+            request_data[idx]["tokens"] = getattr(o.outputs[0], "token_ids", []) or []
+            request_data[idx]["text"] = getattr(o.outputs[0], "text", "")
+
+        m = getattr(o, "metrics", None)
+        ft = None
+        if m:
+            if isinstance(m, dict):
+                ft = m.get("first_token_latency_s") or m.get("first_token_latency")
             else:
-                # If no request_id, assume outputs come in order
-                request_id = request_idx
-                if output.finished or (output.outputs and len(output.outputs) > 0 and len(output.outputs[0].token_ids) > 0):
-                    # Only increment when we see actual output
-                    if output.finished:
-                        request_idx = (request_idx + 1) % batch_size
-            
-            # Ensure request_id is valid
-            if request_id not in request_data:
-                request_id = 0
-            
-            # Initialize start time (only once per request)
-            if request_data[request_id]["start_time"] is None:
-                request_data[request_id]["start_time"] = current_time
-            
-            # Record first token time (only once per request)
-            if not request_data[request_id]["seen_first_token"]:
-                if output.outputs and len(output.outputs) > 0:
-                    if len(output.outputs[0].token_ids) > 0:
-                        request_data[request_id]["first_token_time"] = current_time
-                        request_data[request_id]["seen_first_token"] = True
-            
-            # Collect tokens and text (accumulate)
-            if output.outputs and len(output.outputs) > 0:
-                request_data[request_id]["tokens"] = output.outputs[0].token_ids
-                request_data[request_id]["text"] = output.outputs[0].text
-            
-            # Mark completion
-            if hasattr(output, 'finished') and output.finished:
-                request_data[request_id]["end_time"] = current_time
-    
-    except Exception as e:
-        # Fallback: streaming not supported, use batch mode
-        print(f"Streaming failed ({e}), falling back to batch mode")
-        
-        t0 = time.perf_counter()
-        outputs = llm.generate(prompts, sampling)
-        t1 = time.perf_counter()
-        
-        # Extract from batch outputs
-        for idx, o in enumerate(outputs):
-            request_data[idx]["start_time"] = t0
-            request_data[idx]["end_time"] = t1
-            
-            if getattr(o, "outputs", None) and len(o.outputs) > 0:
-                request_data[idx]["tokens"] = getattr(o.outputs[0], "token_ids", []) or []
-                request_data[idx]["text"] = getattr(o.outputs[0], "text", "")
-            
-            # Try to extract TTFT from metrics
-            m = getattr(o, "metrics", None)
-            if m:
-                ft = None
-                if isinstance(m, dict):
-                    for k in ("first_token_latency_s", "first_token_latency"):
-                        if k in m:
-                            ft = float(m[k]) if m[k] > 1e3 else float(m[k])
-                            if ft > 1e6: ft /= 1e9
-                            elif ft > 1e3: ft /= 1e3
-                            break
-                else:
-                    for k in ("first_token_latency_s", "first_token_latency"):
-                        v = getattr(m, k, None)
-                        if v is not None:
-                            ft = float(v) if v > 1e3 else float(v)
-                            if ft > 1e6: ft /= 1e9
-                            elif ft > 1e3: ft /= 1e3
-                            break
-                
-                if ft and ft > 0:
-                    request_data[idx]["first_token_time"] = t0 + ft
-    
+                ft = getattr(m, "first_token_latency_s", None) or getattr(m, "first_token_latency", None)
+        if ft is not None:
+            ft = float(ft)
+            # Normalize if provided in ms/µs/ns
+            if ft > 1e6: ft /= 1e9
+            elif ft > 1e3: ft /= 1e3
+            request_data[idx]["first_token_time"] = t0 + max(0.0, ft)
+
     total_end = time.perf_counter()
     wall_time = total_end - total_start
-    
-    # Calculate metrics from collected data
-    # Calculate metrics from collected data
-    ttft_values = []
-    tpot_values = []  # Time per output token
-    total_output_tokens = 0
-    generated_texts = []
 
-    for req_id, data in request_data.items():
-        num_tokens = len(data["tokens"])
-        total_output_tokens += num_tokens
-        
+    # Aggregate metrics
+    ttft_values, tpot_values = [], []
+    total_output_tokens = 0
+
+    for data in request_data.values():
+        n_tok = len(data["tokens"])
+        total_output_tokens += n_tok
         if data["first_token_time"] and data["start_time"]:
             ttft = data["first_token_time"] - data["start_time"]
-            ttft_values.append(ttft)
-            
-            # Calculate time per output token (TPOT) for decode phase
-            if data["end_time"] and num_tokens > 1:
+            if ttft > 0:
+                ttft_values.append(ttft)
+            if data["end_time"] and n_tok > 1:
                 decode_time = data["end_time"] - data["first_token_time"]
-                # Subtract 1 because first token is already counted in TTFT
-                tpot = decode_time / max(1, num_tokens - 1)
-                tpot_values.append(tpot)
-        
-        if data["text"]:
-            generated_texts.append(data["text"])
+                if decode_time > 0:
+                    tpot_values.append(decode_time / max(1, n_tok - 1))
 
-    # Calculate timing metrics
     if ttft_values:
-        avg_ttft_s = sum(ttft_values) / len(ttft_values)
-        ttft_p50 = sorted(ttft_values)[len(ttft_values) // 2]
-        ttft_p95 = sorted(ttft_values)[int(len(ttft_values) * 0.95)] if len(ttft_values) > 1 else ttft_values[0]
+        ttft_values_sorted = sorted(ttft_values)
+        ttft_avg_s = sum(ttft_values_sorted) / len(ttft_values_sorted)
+        ttft_p50_s = ttft_values_sorted[len(ttft_values_sorted)//2]
+        ttft_p95_s = ttft_values_sorted[min(len(ttft_values_sorted)-1, int(0.95*(len(ttft_values_sorted)-1)))]
     else:
-        # Fallback: estimate based on wall time
-        avg_ttft_s = wall_time * 0.1  # Assume 10% for prefill
-        ttft_p50 = avg_ttft_s
-        ttft_p95 = avg_ttft_s
+        ttft_avg_s = min(0.2 * wall_time, wall_time)
+        ttft_p50_s = ttft_avg_s
+        ttft_p95_s = ttft_avg_s
 
     if tpot_values:
-        avg_tpot_s = sum(tpot_values) / len(tpot_values)
-        # Total decode time across all requests
-        total_decode_time = sum(
-            (data["end_time"] - data["first_token_time"]) 
-            for data in request_data.values() 
-            if data["end_time"] and data["first_token_time"]
+        tpot_avg_s = sum(tpot_values)/len(tpot_values)
+        decode_time_total_s = sum(
+            (d["end_time"] - d["first_token_time"])
+            for d in request_data.values()
+            if d["end_time"] and d["first_token_time"]
         )
     else:
-        # Fallback
-        total_decode_time = wall_time - avg_ttft_s
-        avg_tpot_s = total_decode_time / max(1, total_output_tokens)
+        decode_time_total_s = max(0.0, wall_time - ttft_avg_s)
+        tpot_avg_s = (decode_time_total_s / max(1, total_output_tokens)) if total_output_tokens else 0.0
 
-    # Throughput calculations
-    # Prefill throughput: input tokens / time to first token (averaged)
-    total_input_tokens = batch_size * input_tokens
-    prefill_tok_s = total_input_tokens / max(1e-6, avg_ttft_s)
+    tokens_in_total = batch_size * input_tokens
+    prefill_tok_s = (tokens_in_total / ttft_avg_s) if ttft_avg_s > 0 else 0.0
+    decode_tok_s  = (total_output_tokens / decode_time_total_s) if decode_time_total_s > 0 else 0.0
+    overall_tok_s = (tokens_in_total + total_output_tokens) / max(1e-6, wall_time)
 
-    # Decode throughput: output tokens / decode time
-    # Note: For batch_size > 1, decode happens in parallel
-    decode_tok_s = total_output_tokens / max(1e-6, total_decode_time) if total_decode_time > 0 else 0.0
-
-    # Overall throughput: all tokens / wall time
-    overall_tok_s = (total_input_tokens + total_output_tokens) / max(1e-6, wall_time)
+    # --- Simple eval so accuracy/eval_results are always defined ---
+    generated_texts = [d["text"] for d in request_data.values() if d["text"]]
+    eval_results = []
+    if generated_texts:
+        try:
+            # use the first sample for a quick check
+            r = _eval_python_code(generated_texts[0])
+            eval_results.append(r)
+            accuracy = 1.0 if r.get("passed") else 0.0
+        except Exception as _:
+            accuracy = 0.0
+    else:
+        accuracy = 0.0
 
     metrics = {
         "model": model,
@@ -369,28 +318,20 @@ def bench_b200(args=None):
             "temperature": temperature,
             "top_p": top_p,
         },
-        # Token counts
-        "tokens_in_total": total_input_tokens,
+        "tokens_in_total": tokens_in_total,
         "tokens_out_total": total_output_tokens,
         "requests": batch_size,
-        
-        # Timing
         "wall_time_s": wall_time,
-        "ttft_avg_s": avg_ttft_s,
-        "ttft_p50_s": ttft_p50,
-        "ttft_p95_s": ttft_p95,
-        "tpot_avg_s": avg_tpot_s,  # Average time per output token
-        "decode_time_total_s": total_decode_time,
-        
-        # Throughput (tokens/sec)
-        "prefill_tok_s": prefill_tok_s,  # Input tokens / TTFT
-        "decode_tok_s": decode_tok_s,    # Output tokens / decode time
-        "overall_tok_s": overall_tok_s,   # All tokens / wall time
-        
-        # Evaluation
+        "ttft_avg_s": ttft_avg_s,
+        "ttft_p50_s": ttft_p50_s,
+        "ttft_p95_s": ttft_p95_s,
+        "tpot_avg_s": tpot_avg_s,
+        "decode_time_total_s": decode_time_total_s,
+        "prefill_tok_s": prefill_tok_s,
+        "decode_tok_s": decode_tok_s,
+        "overall_tok_s": overall_tok_s,
         "accuracy": accuracy,
         "eval_details": eval_results,
-        
         "timestamp": datetime.utcnow().isoformat() + "Z",
     }
 
