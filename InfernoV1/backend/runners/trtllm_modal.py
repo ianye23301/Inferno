@@ -40,7 +40,17 @@ def _eval_python_code(code: str) -> dict:
     import sys
     import io
     import traceback
-    
+    import sys, io, traceback, textwrap
+
+    # Normalize code formatting
+    # 1) Remove leading/trailing whitespace lines
+    code = code.strip()
+    # 2) Remove Markdown fences if present
+    if code.startswith("```"):
+        code = code.split("```", 2)[-1]
+    # 3) Dedent any leading indentation
+    code = textwrap.dedent(code)
+
     # Basic syntax check
     try:
         compile(code, '<string>', 'exec')
@@ -100,7 +110,8 @@ def _eval_python_code(code: str) -> dict:
             "traceback": traceback.format_exc()
         }
 
-    
+
+        
 @app.function(
     image=image,
     gpu="B200",
@@ -142,7 +153,6 @@ def bench_b200(args=None):
         build_config=build_config,
     )
 
-    # NEW: Use actual coding prompt
     prompt_text = "Build a snake game in Python."
     prompts = [prompt_text] * batch_size
 
@@ -152,12 +162,11 @@ def bench_b200(args=None):
     outputs = llm.generate(prompts, sampling)
     t1 = time.perf_counter()
 
-    # Aggregate throughput metrics
-        # Aggregate throughput + timing
+    # Aggregate throughput + timing
     total_new_tokens = 0
     total_input_tokens = batch_size * max(0, int(input_tokens))
     ttft_values = []
-    per_request = []  # collect per-request stats for p50/p95 etc.
+    per_request = []
 
     def _norm_seconds(x: float) -> float:
         if x > 1e6: return x / 1e9
@@ -165,20 +174,18 @@ def bench_b200(args=None):
         return x
 
     for idx, o in enumerate(outputs):
-        # count output tokens defensively
+        # Count output tokens
         out_tok = 0
         if getattr(o, "outputs", None) and len(o.outputs) > 0:
-            # some versions expose token_ids, others output_token_ids
             ids = getattr(o.outputs[0], "token_ids", None) or getattr(o.outputs[0], "output_token_ids", None)
             if ids is not None:
                 out_tok = len(ids)
         total_new_tokens += out_tok
 
-        # TTFT extraction across schema variants
+        # TTFT extraction
         m = getattr(o, "metrics", None)
         ft = None
         if m is not None:
-            # handle object-attr and dict styles
             if isinstance(m, dict):
                 for k in ("first_token_latency_s", "first_token_latency"):
                     if k in m:
@@ -211,30 +218,33 @@ def bench_b200(args=None):
 
     # Prefill/decode split
     if ttft_values:
-        ttft_s = sum(ttft_values) / len(ttft_values)
-        if ttft_s >= wall:
-            ttft_s = wall * 0.9
-        decode_time_s = max(1e-6, wall - ttft_s)
+        avg_ttft_s = sum(ttft_values) / len(ttft_values)
+        # Cap TTFT at 90% of wall time if somehow larger
+        if avg_ttft_s >= wall:
+            avg_ttft_s = wall * 0.9
+        decode_time_s = max(1e-6, wall - avg_ttft_s)
     else:
-        # Fallback split if TTFT not reported
+        # Fallback: estimate prefill as proportional to input tokens
         approx_prefill = wall * (total_input_tokens / max(1.0, total_input_tokens + total_new_tokens))
-        ttft_s = min(approx_prefill, wall * 0.9)
-        decode_time_s = max(1e-6, wall - ttft_s)
+        avg_ttft_s = min(approx_prefill, wall * 0.9)
+        decode_time_s = max(1e-6, wall - avg_ttft_s)
 
-    # Rates
-    output_tok_s = (total_new_tokens / decode_time_s) if total_new_tokens > 0 else 0.0
-    prefill_tok_s = (total_input_tokens / ttft_s) if ttft_s > 0 and total_input_tokens > 0 else 0.0
+    # Rates - FIXED CALCULATIONS
+    # Throughput = output tokens / decode time (tokens per second during generation)
+    throughput_tok_s = (total_new_tokens / decode_time_s) if total_new_tokens > 0 else 0.0
+    
+    # Prefill rate = input tokens / prefill time (tokens per second during prefill)
+    prefill_tok_s = (total_input_tokens / avg_ttft_s) if avg_ttft_s > 0 and total_input_tokens > 0 else 0.0
+    
+    # Overall rate = all tokens / wall time
+    overall_tok_s = ((total_input_tokens + total_new_tokens) / wall) if wall > 0 else 0.0
 
-    # ---------- Code evaluation (robust) ----------
+    # Code evaluation
     eval_results = []
     for o in outputs:
         text = None
         if getattr(o, "outputs", None) and len(o.outputs) > 0:
-            # prefer text if present
             text = getattr(o.outputs[0], "text", None)
-            if not text:
-                # fall back: empty text → treat as failed completeness 0
-                pass
         if text:
             eval_results.append(_eval_python_code(text))
         else:
@@ -245,7 +255,7 @@ def bench_b200(args=None):
                 "completeness": 0.0
             })
 
-    # Accuracy: average(pass_flag) * avg(completeness), but never None
+    # Accuracy
     if eval_results:
         pass_rate = sum(1 for e in eval_results if e.get("passed")) / len(eval_results)
         avg_completeness = sum(float(e.get("completeness", 0.0)) for e in eval_results) / len(eval_results)
@@ -279,28 +289,34 @@ def bench_b200(args=None):
             "temperature": temperature,
             "top_p": top_p,
         },
-        # counts
+        # Token counts
         "tokens_in_total": total_input_tokens,
         "tokens_out_total": total_new_tokens,
         "requests": len(outputs),
-        # timing
+        
+        # Timing breakdown
         "wall_time_s": wall,
-        "ttft_avg_s": ttft_s,
+        "ttft_avg_s": avg_ttft_s,
         "ttft_p50_s": ttft_p50,
         "ttft_p95_s": ttft_p95,
         "decode_time_s": decode_time_s,
-        # rates
-        "output_tok_s": output_tok_s,            # explicit alias
-        "throughput_tok_s": output_tok_s,        # keep your original key too
-        "prefill_tok_s": prefill_tok_s,
-        # eval
+        
+        # Throughput rates (tokens/second)
+        "decode_tok_s": throughput_tok_s,          # Output generation rate
+        "prefill_tok_s": prefill_tok_s,            # Input processing rate  
+        "overall_tok_s": overall_tok_s,            # Total throughput
+        
+        # Keep this for backward compatibility with your existing code
+        "throughput_tok_s": throughput_tok_s,
+        
+        # Evaluation
         "accuracy": accuracy,
         "eval_details": eval_results,
-        # per-request (useful for debugging spread)
+        
+        # Per-request details
         "per_request": per_request,
         "timestamp": datetime.utcnow().isoformat() + "Z",
     }
-
 
     print(json.dumps({"event": "metrics", "data": metrics}))
     return metrics
