@@ -149,20 +149,21 @@ def _eval_python_code(code: str) -> dict:
             "traceback": traceback.format_exc()
         }
 
-# Dynamic GPU allocation based on tensor_parallel argument
+# Single GPU version (original)
 @app.function(
     image=image,
-    gpu=modal.gpu.B200(count=1),  # Default, will be overridden
+    gpu="B200",
     secrets=[modal.Secret.from_name(HF_SECRET_NAME)],
     volumes={"/engines": vol},
     timeout=60*30
 )
-def bench_b200_tp1(args=None):
+def bench_b200(args=None):
     return _bench_b200_impl(args)
 
+# 2 GPU version
 @app.function(
     image=image,
-    gpu=modal.gpu.B200(count=2),
+    gpu="B200:2",
     secrets=[modal.Secret.from_name(HF_SECRET_NAME)],
     volumes={"/engines": vol},
     timeout=60*30
@@ -170,14 +171,26 @@ def bench_b200_tp1(args=None):
 def bench_b200_tp2(args=None):
     return _bench_b200_impl(args)
 
+# 4 GPU version
 @app.function(
     image=image,
-    gpu=modal.gpu.B200(count=4),
+    gpu="B200:4",
     secrets=[modal.Secret.from_name(HF_SECRET_NAME)],
     volumes={"/engines": vol},
     timeout=60*30
 )
 def bench_b200_tp4(args=None):
+    return _bench_b200_impl(args)
+
+# 8 GPU version
+@app.function(
+    image=image,
+    gpu="B200:8",
+    secrets=[modal.Secret.from_name(HF_SECRET_NAME)],
+    volumes={"/engines": vol},
+    timeout=60*30
+)
+def bench_b200_tp8(args=None):
     return _bench_b200_impl(args)
 
 def _bench_b200_impl(args=None):
@@ -236,11 +249,10 @@ def _bench_b200_impl(args=None):
         os.environ["NCCL_IB_DISABLE"] = "1"
         os.environ["NCCL_P2P_DISABLE"] = "1"
         os.environ["NCCL_SOCKET_IFNAME"] = "eth0"
-        # Increase timeouts for slow initializations
         os.environ["NCCL_TIMEOUT"] = "600"
         os.environ["NCCL_LAUNCH_MODE"] = "PARALLEL"
         
-        # Allow TRT-LLM to manage its own process group
+        # TRT-LLM orchestrator settings
         os.environ["TRTLLM_ORCHESTRATOR_ADDR"] = "127.0.0.1"
         os.environ["TRTLLM_ORCHESTRATOR_PORT"] = "29500"
 
