@@ -108,7 +108,7 @@ def _eval_python_code(code: str) -> dict:
         sys.stdout = old_stdout
         sys.stderr = old_stderr
         return {
-            "passed": True,  # ← Changed to True!
+            "passed": True,
             "error": "ModuleNotFoundError",
             "detail": str(e),
             "completeness": completeness_score,
@@ -145,24 +145,48 @@ def _eval_python_code(code: str) -> dict:
             "passed": False,
             "error": error_type,
             "detail": str(e),
-            "completeness": max(0.0, completeness_score - 0.3),  # Penalize but don't zero out
+            "completeness": max(0.0, completeness_score - 0.3),
             "traceback": traceback.format_exc()
         }
+
+# Dynamic GPU allocation based on tensor_parallel argument
 @app.function(
     image=image,
-    gpu="B200",
+    gpu=modal.gpu.B200(count=1),  # Default, will be overridden
     secrets=[modal.Secret.from_name(HF_SECRET_NAME)],
     volumes={"/engines": vol},
     timeout=60*30
 )
-def bench_b200(args=None):
+def bench_b200_tp1(args=None):
+    return _bench_b200_impl(args)
+
+@app.function(
+    image=image,
+    gpu=modal.gpu.B200(count=2),
+    secrets=[modal.Secret.from_name(HF_SECRET_NAME)],
+    volumes={"/engines": vol},
+    timeout=60*30
+)
+def bench_b200_tp2(args=None):
+    return _bench_b200_impl(args)
+
+@app.function(
+    image=image,
+    gpu=modal.gpu.B200(count=4),
+    secrets=[modal.Secret.from_name(HF_SECRET_NAME)],
+    volumes={"/engines": vol},
+    timeout=60*30
+)
+def bench_b200_tp4(args=None):
+    return _bench_b200_impl(args)
+
+def _bench_b200_impl(args=None):
     # TRT-LLM 1.0
     from tensorrt_llm import LLM, SamplingParams, BuildConfig
-    # KvCacheConfig class location & signature (TRT-LLM 1.0):
     try:
         from tensorrt_llm.llmapi import KvCacheConfig
     except Exception:
-        KvCacheConfig = None  # tolerate older/newer builds
+        KvCacheConfig = None
 
     import time, json, os, inspect
     from datetime import datetime
@@ -178,39 +202,50 @@ def bench_b200(args=None):
     batch_size = int(args.get("batch_size", 1))
     input_tokens = int(args.get("input_tokens", 128))
 
-    # Sampling (default to greedy for max throughput unless overridden)
+    # Sampling
     temperature = float(args.get("temperature", 0.0))
     top_p = float(args.get("top_p", 1.0))
     top_k = args.get("top_k", None)
     if top_k is not None:
         top_k = int(top_k)
 
-    # Extra runtime/build flags surfaced for sweeps
+    # Extra runtime/build flags
     extra = args.get("extra", {}) or {}
     use_paged_context_fmha = bool(extra.get("use_paged_context_fmha", True))
     enable_block_reuse      = bool(extra.get("enable_block_reuse", True))
     kv_block_size           = extra.get("kv_block_size", None)
     sink_token_length       = extra.get("sink_token_length", None)
-    lookahead_decode        = extra.get("lookahead_decode", 0)  # 0 disables if unsupported
-    return_logits           = bool(extra.get("return_logits", False))
-    eos_token_id            = extra.get("eos_token_id", None)
+    lookahead_decode        = extra.get("lookahead_decode", 0)
 
-    # Bound KV cache to avoid huge allocations:
-    # budget ~= B * (prompt + generate + headroom)
+    # KV cache budget
     max_tokens_budget = batch_size * (input_tokens + max_new_tokens + 128)
 
-    # DType normalization for TRT-LLM
+    # DType normalization
     llm_dtype = "fp8" if dtype.lower() == "fp8" else dtype
 
-    # Auth passthrough
+    # Auth
     tok = os.environ.get("HUGGINGFACE_HUB_TOKEN") or os.environ.get("HF_TOKEN")
     if tok:
         os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", tok)
         os.environ.setdefault("HF_TOKEN", tok)
 
+    # ===== CRITICAL: Multi-GPU NCCL Setup =====
+    if tp > 1:
+        print(f"[INFO] Setting up multi-GPU environment for TP={tp}")
+        os.environ["NCCL_DEBUG"] = "INFO"
+        os.environ["NCCL_IB_DISABLE"] = "1"
+        os.environ["NCCL_P2P_DISABLE"] = "1"
+        os.environ["NCCL_SOCKET_IFNAME"] = "eth0"
+        # Increase timeouts for slow initializations
+        os.environ["NCCL_TIMEOUT"] = "600"
+        os.environ["NCCL_LAUNCH_MODE"] = "PARALLEL"
+        
+        # Allow TRT-LLM to manage its own process group
+        os.environ["TRTLLM_ORCHESTRATOR_ADDR"] = "127.0.0.1"
+        os.environ["TRTLLM_ORCHESTRATOR_PORT"] = "29500"
+
     # Build config
     build_config = BuildConfig(max_seq_len=max_seq, strongly_typed=True)
-    # plugin config
     try:
         build_config.plugin_config.use_paged_context_fmha = use_paged_context_fmha
     except Exception:
@@ -218,17 +253,19 @@ def bench_b200(args=None):
 
     if kv_block_size is not None:
         try:
-            # Not all builds expose this; guard it
             build_config.plugin_config.kv_cache_block_size = int(kv_block_size)
         except Exception:
             pass
 
     # Create LLM/engine
+    print(f"[INFO] Initializing LLM with TP={tp}, dtype={llm_dtype}")
     llm = LLM(
         model=model,
         tensor_parallel_size=tp,
         dtype=llm_dtype,
         build_config=build_config,
+        skip_tokenizer_init=False,
+        enable_tqdm=False,
     )
 
     # Prompt(s)
@@ -237,56 +274,46 @@ def bench_b200(args=None):
 
     # Sampling params
     sampling_kwargs = dict(
-    temperature=temperature,
-    top_p=top_p,
-    max_tokens=max_new_tokens,
-    return_generation_logits=bool(extra.get("return_generation_logits", False)),
-    return_context_logits=bool(extra.get("return_context_logits", False)),
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_new_tokens,
+        return_generation_logits=bool(extra.get("return_generation_logits", False)),
+        return_context_logits=bool(extra.get("return_context_logits", False)),
     )
     if top_k is not None:
         sampling_kwargs["top_k"] = top_k
-    # eos -> use end_id for TRT-LLM
     if extra.get("eos_token_id") is not None:
         sampling_kwargs["end_id"] = int(extra["eos_token_id"])
 
     sampling = SamplingParams(**sampling_kwargs)
-    if extra.get("lookahead_decode", 0):
-        try:
-            sampling.lookahead_config = tllme.LookaheadDecodingConfig(
-                num_lookahead_tokens=int(extra["lookahead_decode"])
-            )
-        except Exception:
-            pass
-    # Optional: lookahead / recurrent drafting if the field exists
-    # Some TRT-LLM builds accept lookahead via SamplingParams or via session/runtime config.
+    
+    # Optional lookahead
     for attr in ("lookahead_decode", "draft_tokens", "num_lookahead_tokens"):
         if hasattr(sampling, attr) and lookahead_decode:
             try:
                 setattr(sampling, attr, int(lookahead_decode))
                 break
             except Exception:
-                pass  # harmless if not compatible
+                pass
 
-    # KV cache configuration (TRT-LLM 1.0 constructor):
+    # KV cache configuration
     kv_cfg = None
     if KvCacheConfig is not None:
         try:
             kv_kwargs = {"enable_block_reuse": enable_block_reuse}
-            # Guard optional fields by presence in signature to work across minor revs
             sig = inspect.signature(KvCacheConfig)
             if "max_tokens" in sig.parameters:
                 kv_kwargs["max_tokens"] = int(max_tokens_budget)
             if "max_attention_window" in sig.parameters and input_tokens:
-                # keep a window that's enough for the prompt
                 kv_kwargs["max_attention_window"] = [int(max_seq)]
             if "sink_token_length" in sig.parameters and (sink_token_length is not None):
                 kv_kwargs["sink_token_length"] = int(sink_token_length)
 
             kv_cfg = KvCacheConfig(**kv_kwargs)
         except Exception:
-            kv_cfg = None  # continue without explicit config
+            kv_cfg = None
 
-    # --- Tracking ---
+    # Tracking
     request_data = {i: {
         "start_time": None,
         "first_token_time": None,
@@ -297,13 +324,11 @@ def bench_b200(args=None):
 
     total_start = time.perf_counter()
 
-    # --- Generate ---
+    # Generate
     t0 = time.perf_counter()
     generate_kwargs = {}
-    # Pass kv cache config if the generate() supports it
     if kv_cfg is not None:
         try:
-            # check if 'kv_cache_config' is an arg
             if "kv_cache_config" in inspect.signature(llm.generate).parameters:
                 generate_kwargs["kv_cache_config"] = kv_cfg
         except Exception:
@@ -312,7 +337,7 @@ def bench_b200(args=None):
     outputs = llm.generate(prompts, sampling, **generate_kwargs)
     t1 = time.perf_counter()
 
-    # --- Extract results & first-token latency ---
+    # Extract results
     for idx, o in enumerate(outputs):
         request_data[idx]["start_time"] = t0
         request_data[idx]["end_time"] = t1
@@ -331,15 +356,15 @@ def bench_b200(args=None):
         if ft is not None:
             ft = float(ft)
             if ft > 1e6:
-                ft /= 1e9  # ns -> s
+                ft /= 1e9
             elif ft > 1e3:
-                ft /= 1e3  # ms -> s
+                ft /= 1e3
             request_data[idx]["first_token_time"] = t0 + max(0.0, ft)
 
     total_end = time.perf_counter()
     wall_time = total_end - total_start
 
-    # --- Aggregate metrics ---
+    # Aggregate metrics
     ttft_values, tpot_values = [], []
     total_output_tokens = 0
 
@@ -381,7 +406,7 @@ def bench_b200(args=None):
     decode_tok_s  = (total_output_tokens / decode_time_total_s) if decode_time_total_s > 0 else 0.0
     overall_tok_s = (tokens_in_total + total_output_tokens) / max(1e-6, wall_time)
 
-    # --- Quick eval ---
+    # Quick eval
     generated_texts = [d["text"] for d in request_data.values() if d["text"]]
     eval_results = []
     if generated_texts:
@@ -396,7 +421,7 @@ def bench_b200(args=None):
 
     metrics = {
         "model": model,
-        "gpu": "B200",
+        "gpu": f"B200x{tp}",
         "config": {
             "dtype": dtype,
             "tensor_parallel": tp,
