@@ -14,6 +14,55 @@ from datetime import datetime
 app = FastAPI(title="Inferno Control Plane (MVP)")
 _background = start_background_scheduler()
 
+# --- helpers (put near your imports) ---
+ALIASES_TO_CANON = {
+    "throughput_tok_s": "overall_tok_s",
+    "output_tok_s": "decode_tok_s",
+    "decode_time_s": "decode_time_total_s",
+    "ttft_s": "ttft_avg_s",
+    "time_to_first_token_s": "ttft_avg_s",
+}
+
+# given a metric name from the client, return the canonical name you store/emit
+def canon_name(name: str) -> str:
+    return ALIASES_TO_CANON.get(name, name)
+
+# resolve a metric value from a row's metrics dict with alias fallback
+def get_metric_value(metrics: dict, name: str):
+    # exact hit
+    v = metrics.get(name)
+    if v is not None:
+        return v
+    # alias fallback
+    alt = ALIASES_TO_CANON.get(name)
+    if alt is not None:
+        return metrics.get(alt)
+    return None
+
+# make a copy of metrics that includes only canon keys and adds computed/alias fields if you want
+def project_metrics(m: dict) -> dict:
+    # prefer canon keys; compute a minimal compat set
+    out = {
+        "decode_tok_s": m.get("decode_tok_s"),
+        "prefill_tok_s": m.get("prefill_tok_s"),
+        "overall_tok_s": m.get("overall_tok_s"),
+        "ttft_avg_s": m.get("ttft_avg_s") or m.get("ttft_s") or m.get("time_to_first_token_s"),
+        "ttft_p50_s": m.get("ttft_p50_s"),
+        "ttft_p95_s": m.get("ttft_p95_s"),
+        "tpot_avg_s": m.get("tpot_avg_s"),
+        "decode_time_total_s": m.get("decode_time_total_s") or m.get("decode_time_s"),
+        "tokens_out_total": m.get("tokens_out_total"),
+        "accuracy": m.get("accuracy"),
+        "timestamp": m.get("timestamp"),
+    }
+    # optional: include legacy fields for downstreams that still expect them
+    if out["overall_tok_s"] is not None and "throughput_tok_s" not in m:
+        out["throughput_tok_s"] = out["overall_tok_s"]
+    if out["decode_tok_s"] is not None and "output_tok_s" not in m:
+        out["output_tok_s"] = out["decode_tok_s"]
+    if out["decode_time_total_s"] is not None and "decode_time_s" not in m:
+        out["decode_time_s"] = out["decode_time_total_s"]
+    return out
 
 
 
@@ -136,64 +185,62 @@ def _choose_best(job_name: str, metric: str, mode: str = "max") -> Tuple[dict, d
         raise HTTPException(404, f"No metrics found for job '{job_name}' with metric '{metric}'")
     return best_row, best_m
 
-
 @app.get("/jobs/{job_name}/best")
 def get_job_best(
     job_name: str, 
-    metric: str = "throughput_tok_s", 
+    metric: str = "decode_tok_s", 
     mode: str = "max",
     return_all: bool = False,
     filter_passed: bool = False
 ):
-    """
-    Get best run or all runs for a job.
-    
-    Args:
-        metric: Metric to optimize for
-        mode: 'max' or 'min'
-        return_all: If True, return all runs sorted by metric instead of just the best
-        filter_passed: If True, only consider runs where accuracy > 0 (code passed eval)
-    """
+    metric = canon_name(metric)
+    if mode not in ("max", "min"):
+        raise HTTPException(400, "mode must be 'max' or 'min'")
+
     if not return_all:
-        # Original behavior: return only the best
-        # Apply filter if requested
         candidates = []
         for row, m in registry.iter_job_metrics(job_name):
-            if metric not in m or m[metric] is None:
+            val = get_metric_value(m, metric)
+            if val is None:
                 continue
             if filter_passed and (m.get("accuracy") is None or m.get("accuracy") <= 0):
                 continue
-            candidates.append((row, m))
-        
-        if not candidates:
-            raise HTTPException(404, f"No runs found for job '{job_name}' with metric '{metric}'" + 
-                              (" that passed evaluation" if filter_passed else ""))
-        
-        # Find best among candidates
-        best_row, best_m = None, None
-        for row, m in candidates:
-            def better(cur, best):
-                if best is None:
-                    return True
-                if mode == "max":
-                    if cur[metric] != best[metric]:
-                        return cur[metric] > best[metric]
-                else:
-                    if cur[metric] != best[metric]:
-                        return cur[metric] < best[metric]
-                # Tie-breakers
-                ca, ba = (cur.get("accuracy"), best.get("accuracy"))
-                if (ca is not None) or (ba is not None):
-                    if (ca or -1) != (ba or -1):
-                        return (ca or -1) > (ba or -1)
-                ctt, btt = (cur.get("ttft_avg_s") or cur.get("ttft_s"), 
-                           best.get("ttft_avg_s") or best.get("ttft_s"))
-                if (ctt is not None) and (btt is not None) and ctt != btt:
-                    return ctt < btt
-                return False
+            candidates.append((row, m, val))
 
-            if better(m, best_m):
-                best_row, best_m = row, m
+        if not candidates:
+            raise HTTPException(
+                404,
+                f"No runs found for job '{job_name}' with metric '{metric}'" +
+                (" that passed evaluation" if filter_passed else "")
+            )
+
+        best_row, best_m, best_val = None, None, None
+
+        def better(cur_m, cur_val, best_m, best_val):
+            if best_val is None:
+                return True
+            if mode == "max":
+                if cur_val != best_val:
+                    return cur_val > best_val
+            else:
+                if cur_val != best_val:
+                    return cur_val < best_val
+            # tie-breakers
+            ca, ba = (cur_m.get("accuracy"), best_m.get("accuracy"))
+            if (ca is not None) or (ba is not None):
+                ca_ = float("-inf") if ca is None else ca
+                ba_ = float("-inf") if ba is None else ba
+                if ca_ != ba_:
+                    return ca_ > ba_
+            ctt = cur_m.get("ttft_avg_s") or cur_m.get("ttft_s") or cur_m.get("time_to_first_token_s")
+            btt = best_m.get("ttft_avg_s") or best_m.get("ttft_s") or best_m.get("time_to_first_token_s")
+            if (ctt is not None) and (btt is not None) and ctt != btt:
+                return ctt < btt
+            return False
+
+        for row, m, val in candidates:
+            if better(m, val, best_m, best_val):
+                best_row, best_m, best_val = row, m, val
 
         payload = {
             "job_name": job_name,
@@ -204,18 +251,7 @@ def get_job_best(
             "gpu_pool": best_row["gpu_pool"],
             "config": best_m.get("config", {}),
             "model": best_m.get("model"),
-            "metrics": {
-                "throughput_tok_s": best_m.get("throughput_tok_s"),
-                "prefill_tok_s": best_m.get("prefill_tok_s"),
-                "overall_tok_s": best_m.get("overall_tok_s"),
-                "ttft_avg_s": best_m.get("ttft_avg_s") or best_m.get("ttft_s"),
-                "ttft_p50_s": best_m.get("ttft_p50_s"),
-                "ttft_p95_s": best_m.get("ttft_p95_s"),
-                "decode_time_s": best_m.get("decode_time_s"),
-                "tokens_out_total": best_m.get("tokens_out_total"),
-                "accuracy": best_m.get("accuracy"),
-                "timestamp": best_m.get("timestamp"),
-            },
+            "metrics": project_metrics(best_m),
             "paths": {
                 "metrics_path": best_row.get("metrics_path"),
                 "logs_path": best_row.get("logs_path"),
@@ -223,62 +259,51 @@ def get_job_best(
             "state": best_row.get("state"),
             "updated_at": datetime.utcnow().isoformat() + "Z",
         }
-        out_path = registry.write_job_best(job_name, metric, payload)
+        registry.write_job_best(job_name, metric, payload)
         return payload
-    
-    else:
-        # Return all runs sorted by metric
-        results = []
-        
-        for row, m in registry.iter_job_metrics(job_name):
-            if row.get("state") != "COMPLETED":
-                continue
-            
-            # Skip if metric is missing
-            if metric not in m or m[metric] is None:
-                continue
-            
-            # Apply passed filter
-            if filter_passed and (m.get("accuracy") is None or m.get("accuracy") <= 0):
-                continue
-                
-            results.append({
-                "run_id": row["run_id"],
-                "gpu_pool": row["gpu_pool"],
-                "config": m.get("config", {}),
-                "model": m.get("model"),
-                "metrics": {
-                    "throughput_tok_s": m.get("throughput_tok_s"),
-                    "prefill_tok_s": m.get("prefill_tok_s"),
-                    "overall_tok_s": m.get("overall_tok_s"),
-                    "ttft_avg_s": m.get("ttft_avg_s") or m.get("ttft_s"),
-                    "ttft_p50_s": m.get("ttft_p50_s"),
-                    "ttft_p95_s": m.get("ttft_p95_s"),
-                    "decode_time_s": m.get("decode_time_s"),
-                    "tokens_out_total": m.get("tokens_out_total"),
-                    "accuracy": m.get("accuracy"),
-                    "timestamp": m.get("timestamp"),
-                },
-                "paths": {
-                    "metrics_path": row.get("metrics_path"),
-                    "logs_path": row.get("logs_path"),
-                },
-                "state": row.get("state"),
-            })
-        
-        if not results:
-            raise HTTPException(404, f"No completed runs with metric '{metric}' found for job '{job_name}'" +
-                              (" that passed evaluation" if filter_passed else ""))
-        
-        # Sort by the specified metric
-        reverse = (mode == "max")
-        results.sort(key=lambda x: x["metrics"].get(metric) or 0, reverse=reverse)
-        
-        return {
-            "job_name": job_name,
-            "metric": metric,
-            "mode": mode,
-            "filter_passed": filter_passed,
-            "count": len(results),
-            "runs": results
-        }
+
+    # return_all branch
+    results = []
+    for row, m in registry.iter_job_metrics(job_name):
+        if row.get("state") != "COMPLETED":
+            continue
+        val = get_metric_value(m, metric)
+        if val is None:
+            continue
+        if filter_passed and (m.get("accuracy") is None or m.get("accuracy") <= 0):
+            continue
+
+        results.append({
+            "run_id": row["run_id"],
+            "gpu_pool": row["gpu_pool"],
+            "config": m.get("config", {}),
+            "model": m.get("model"),
+            "metrics": project_metrics(m),
+            "paths": {
+                "metrics_path": row.get("metrics_path"),
+                "logs_path": row.get("logs_path"),
+            },
+            "state": row.get("state"),
+        })
+
+    if not results:
+        raise HTTPException(
+            404,
+            f"No completed runs with metric '{metric}' found for job '{job_name}'" +
+            (" that passed evaluation" if filter_passed else "")
+        )
+
+    reverse = (mode == "max")
+    results.sort(
+        key=lambda x: get_metric_value(x["metrics"], metric) or float("-inf"),
+        reverse=reverse
+    )
+
+    return {
+        "job_name": job_name,
+        "metric": metric,
+        "mode": mode,
+        "filter_passed": filter_passed,
+        "count": len(results),
+        "runs": results
+    }
