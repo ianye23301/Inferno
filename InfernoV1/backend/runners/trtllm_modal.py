@@ -149,6 +149,7 @@ def _eval_python_code(code: str) -> dict:
             "traceback": traceback.format_exc()
         }
 
+        
 @app.function(
     image=image,
     gpu="B200",
@@ -157,179 +158,163 @@ def _eval_python_code(code: str) -> dict:
     timeout=60*30
 )
 def bench_b200(args=None):
-    import subprocess
-    import json
-    import os
-    import tempfile
+    from tensorrt_llm import LLM, SamplingParams, BuildConfig
+    import time, json, os
     from datetime import datetime
-    from pathlib import Path
 
     args = _coerce_args(args) if args is not None else {}
-    
+
     model = args.get("model", "Qwen/Qwen2.5-Coder-14B")
     dtype = args.get("dtype", "float16")
     tp = int(args.get("tensor_parallel", 1))
     max_seq = int(args.get("max_seq_len", 4096))
     max_new_tokens = int(args.get("max_new_tokens", 512))
+    temperature = float(args.get("temperature", 0.8))
+    top_p = float(args.get("top_p", 0.95))
     batch_size = int(args.get("batch_size", 1))
     input_tokens = int(args.get("input_tokens", 128))
-    
+
+    build_config = BuildConfig(max_seq_len=max_seq, strongly_typed=True)
+    build_config.plugin_config.use_paged_context_fmha = True
+
+    llm_dtype = "fp8" if dtype.lower() == "fp8" else dtype
+
     tok = os.environ.get("HUGGINGFACE_HUB_TOKEN") or os.environ.get("HF_TOKEN")
     if tok:
         os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", tok)
         os.environ.setdefault("HF_TOKEN", tok)
+
+    llm = LLM(
+        model=model,
+        tensor_parallel_size=tp,
+        dtype=llm_dtype,
+        build_config=build_config,
+    )
+
+    prompt_text = "Build a snake game in Python."
+    prompts = [prompt_text] * batch_size
+
+    sampling = SamplingParams(
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_new_tokens
+    )
+
+    t0 = time.perf_counter()
+    outputs = llm.generate(prompts, sampling)
+    t1 = time.perf_counter()
     
-    # According to the docs, the benchmark script is at:
-    # examples/benchmark/benchmark.py
+    wall_time = t1 - t0
     
-    # Create input dataset (CSV format with prompts)
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-        # Write multiple copies of the prompt for batch testing
-        for _ in range(batch_size):
-            f.write("Build a snake game in Python.\n")
-        dataset_path = f.name
+    # Extract metrics from outputs
+    total_output_tokens = 0
+    generated_texts = []
+    ttft_values = []
+    e2e_values = []
     
-    try:
-        # Build the engine first (if not cached)
-        # The benchmark script can do this automatically, or we can use trtllm-build
+    print(f"DEBUG: Processing {len(outputs)} outputs")
+    
+    for idx, o in enumerate(outputs):
+        # Get tokens and text
+        if hasattr(o, "outputs") and len(o.outputs) > 0:
+            tokens = getattr(o.outputs[0], "token_ids", None) or getattr(o.outputs[0], "output_token_ids", [])
+            text = getattr(o.outputs[0], "text", "")
+            
+            total_output_tokens += len(tokens) if tokens else 0
+            if text:
+                generated_texts.append(text)
         
-        # Run benchmark using gptManagerBenchmark (from the docs)
-        benchmark_script = "/workspace/tensorrt_llm/examples/benchmark/gptManagerBenchmark.py"
-        
-        # Check if script exists, otherwise try alternate location
-        if not Path(benchmark_script).exists():
-            # Try finding it
-            find_result = subprocess.run(
-                ["find", "/workspace", "-name", "gptManagerBenchmark.py"],
-                capture_output=True,
-                text=True
-            )
-            if find_result.stdout.strip():
-                benchmark_script = find_result.stdout.strip().split('\n')[0]
-                print(f"Found benchmark at: {benchmark_script}")
-            else:
-                # Try the simpler benchmark.py
-                benchmark_script = "/workspace/tensorrt_llm/examples/benchmark/benchmark.py"
-        
-        cmd = [
-            "python", benchmark_script,
-            "--model", model,
-            "--dtype", dtype,
-            "--tensor_parallel_size", str(tp),
-            "--max_input_length", str(input_tokens),
-            "--max_output_length", str(max_new_tokens),
-            "--batch_size", str(batch_size),
-            "--input_file", dataset_path,
-            "--output_csv", "/tmp/results.csv",
-            "--warm_up", "2",  # Warm-up iterations
-            "--num_runs", "3",  # Number of benchmark runs
-        ]
-        
-        print(f"Running benchmark: {' '.join(cmd)}")
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=1500,
-            cwd="/workspace"
-        )
-        
-        print("=== STDOUT ===")
-        print(result.stdout)
-        print("=== STDERR ===")
-        print(result.stderr)
-        
-        # Parse CSV results
-        if Path("/tmp/results.csv").exists():
-            import csv
-            with open("/tmp/results.csv") as f:
-                reader = csv.DictReader(f)
-                results = list(reader)
-                
-            if results:
-                # Extract metrics from benchmark results
-                last_result = results[-1]
-                
-                # Now run code evaluation
-                eval_results = []
-                # We need to actually generate to evaluate, so fall back to LLM API for that
-                from tensorrt_llm import LLM, SamplingParams, BuildConfig
-                
-                build_config = BuildConfig(max_seq_len=max_seq, strongly_typed=True)
-                build_config.plugin_config.use_paged_context_fmha = True
-                llm_dtype = "fp8" if dtype.lower() == "fp8" else dtype
-                
-                llm = LLM(
-                    model=model,
-                    tensor_parallel_size=tp,
-                    dtype=llm_dtype,
-                    build_config=build_config,
-                )
-                
-                prompt_text = "Build a snake game in Python."
-                sampling = SamplingParams(
-                    temperature=float(args.get("temperature", 0.8)),
-                    top_p=float(args.get("top_p", 0.95)),
-                    max_tokens=max_new_tokens
-                )
-                
-                outputs = llm.generate([prompt_text] * batch_size, sampling)
-                
-                for o in outputs:
-                    text = None
-                    if getattr(o, "outputs", None) and len(o.outputs) > 0:
-                        text = getattr(o.outputs[0], "text", None)
-                    if text:
-                        eval_results.append(_eval_python_code(text))
-                    else:
-                        eval_results.append({
-                            "passed": False,
-                            "error": "NoOutput",
-                            "completeness": 0.0
-                        })
-                
-                # Calculate accuracy
-                if eval_results:
-                    pass_rate = sum(1 for e in eval_results if e.get("passed")) / len(eval_results)
-                    avg_completeness = sum(float(e.get("completeness", 0.0)) for e in eval_results) / len(eval_results)
-                    accuracy = pass_rate * avg_completeness
-                else:
-                    accuracy = 0.0
-                
-                metrics = {
-                    "model": model,
-                    "gpu": "B200",
-                    "config": {
-                        "dtype": dtype,
-                        "tensor_parallel": tp,
-                        "max_seq_len": max_seq,
-                        "max_new_tokens": max_new_tokens,
-                        "batch_size": batch_size,
-                        "input_tokens": input_tokens,
-                        "temperature": args.get("temperature", 0.8),
-                        "top_p": args.get("top_p", 0.95),
-                    },
-                    # Use NVIDIA's benchmark metrics
-                    "throughput_tok_s": float(last_result.get("throughput", 0)),
-                    "ttft_avg_s": float(last_result.get("time_to_first_token_ms", 0)) / 1000.0,
-                    "latency_s": float(last_result.get("latency_ms", 0)) / 1000.0,
-                    "tokens_out_total": int(last_result.get("total_output_tokens", 0)),
-                    "accuracy": accuracy,
-                    "eval_details": eval_results,
-                    "benchmark_raw": last_result,
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                }
-                
-                print(json.dumps({"event": "metrics", "data": metrics}))
-                return metrics
-        
-        # If benchmark didn't work, return error with logs
-        return {
-            "error": "Benchmark script failed or results not found",
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "returncode": result.returncode
-        }
-        
-    finally:
-        Path(dataset_path).unlink(missing_ok=True)
+        # Try to get metrics_dict from the output
+        metrics_dict = getattr(o, "metrics_dict", None)
+        if metrics_dict:
+            print(f"DEBUG: Output {idx} metrics_dict: {metrics_dict}")
+            
+            # Try different metric name patterns
+            for ttft_key in ["ttft", "TTFT", "time_to_first_token", "first_token_latency"]:
+                if ttft_key in metrics_dict:
+                    ttft_values.append(metrics_dict[ttft_key])
+                    print(f"DEBUG: Found TTFT={metrics_dict[ttft_key]} with key '{ttft_key}'")
+                    break
+            
+            for e2e_key in ["e2e", "E2E", "end_to_end_latency", "total_latency"]:
+                if e2e_key in metrics_dict:
+                    e2e_values.append(metrics_dict[e2e_key])
+                    print(f"DEBUG: Found E2E={metrics_dict[e2e_key]} with key '{e2e_key}'")
+                    break
+        else:
+            print(f"DEBUG: Output {idx} has no metrics_dict")
+    
+    # Calculate timing
+    if ttft_values:
+        avg_ttft_s = sum(ttft_values) / len(ttft_values)
+        ttft_p50 = sorted(ttft_values)[len(ttft_values) // 2]
+        ttft_p95 = sorted(ttft_values)[int(len(ttft_values) * 0.95)] if len(ttft_values) > 1 else ttft_values[0]
+        print(f"DEBUG: Using real TTFT metrics: avg={avg_ttft_s}, p50={ttft_p50}, p95={ttft_p95}")
+    else:
+        # Fallback estimation
+        total_input_tokens = batch_size * input_tokens
+        estimated_prefill_fraction = total_input_tokens / max(1.0, total_input_tokens + total_output_tokens)
+        estimated_prefill_fraction = max(0.05, min(0.5, estimated_prefill_fraction))
+        avg_ttft_s = wall_time * estimated_prefill_fraction
+        ttft_p50 = avg_ttft_s
+        ttft_p95 = avg_ttft_s
+        print(f"DEBUG: Using estimated TTFT: {avg_ttft_s}")
+    
+    decode_time_s = max(1e-6, wall_time - avg_ttft_s)
+    
+    # Throughput calculations
+    throughput_tok_s = (total_output_tokens / decode_time_s) if total_output_tokens > 0 else 0.0
+    prefill_tok_s = ((batch_size * input_tokens) / avg_ttft_s) if avg_ttft_s > 0 else 0.0
+    overall_tok_s = ((batch_size * input_tokens + total_output_tokens) / wall_time) if wall_time > 0 else 0.0
+    
+    # Code evaluation
+    eval_results = []
+    for text in generated_texts:
+        if text:
+            eval_results.append(_eval_python_code(text))
+        else:
+            eval_results.append({
+                "passed": False,
+                "error": "NoOutput",
+                "completeness": 0.0
+            })
+    
+    # Accuracy
+    if eval_results:
+        pass_rate = sum(1 for e in eval_results if e.get("passed")) / len(eval_results)
+        avg_completeness = sum(float(e.get("completeness", 0.0)) for e in eval_results) / len(eval_results)
+        accuracy = pass_rate * avg_completeness
+    else:
+        accuracy = 0.0
+    
+    metrics = {
+        "model": model,
+        "gpu": "B200",
+        "config": {
+            "dtype": dtype,
+            "tensor_parallel": tp,
+            "max_seq_len": max_seq,
+            "max_new_tokens": max_new_tokens,
+            "batch_size": batch_size,
+            "input_tokens": input_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+        },
+        "tokens_in_total": batch_size * input_tokens,
+        "tokens_out_total": total_output_tokens,
+        "requests": batch_size,
+        "wall_time_s": wall_time,
+        "ttft_avg_s": avg_ttft_s,
+        "ttft_p50_s": ttft_p50,
+        "ttft_p95_s": ttft_p95,
+        "decode_time_s": decode_time_s,
+        "throughput_tok_s": throughput_tok_s,
+        "prefill_tok_s": prefill_tok_s,
+        "overall_tok_s": overall_tok_s,
+        "accuracy": accuracy,
+        "eval_details": eval_results,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    }
+
+    print(json.dumps({"event": "metrics", "data": metrics}))
+    return metrics
