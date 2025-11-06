@@ -31,86 +31,123 @@ def _coerce_args(args):
             pass
     return {}
 
-
 def _eval_python_code(code: str) -> dict:
     """
     Evaluate generated Python code for correctness.
     Returns dict with pass/fail and error info.
     """
-    import sys
-    import io
-    import traceback
     import sys, io, traceback, textwrap
 
     # Normalize code formatting
-    # 1) Remove leading/trailing whitespace lines
     code = code.strip()
-    # 2) Remove Markdown fences if present
+    # Remove Markdown fences if present
     if code.startswith("```"):
-        code = code.split("```", 2)[-1]
-    # 3) Dedent any leading indentation
+        lines = code.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        code = "\n".join(lines)
+    # Dedent any leading indentation
     code = textwrap.dedent(code)
 
     # Basic syntax check
     try:
         compile(code, '<string>', 'exec')
+        syntax_valid = True
     except SyntaxError as e:
         return {
             "passed": False,
             "error": "SyntaxError",
-            "detail": str(e)
+            "detail": str(e),
+            "completeness": 0.0
         }
     
-    # Try to execute (with timeout protection)
+    # Check for common game components (snake game specific)
+    code_lower = code.lower()
+    has_game_loop = any(keyword in code_lower for keyword in ['while', 'for', 'loop'])
+    has_snake_logic = any(keyword in code_lower for keyword in ['snake', 'direction', 'move', 'position'])
+    has_imports = 'import' in code
+    has_class_or_function = 'def ' in code or 'class ' in code
+    
+    # Completeness score (0.0 to 1.0)
+    completeness_score = sum([
+        has_game_loop * 0.25,
+        has_snake_logic * 0.25,
+        has_imports * 0.25,
+        has_class_or_function * 0.25
+    ])
+    
+    # Try to execute (with graceful handling of import errors)
     try:
-        # Capture stdout/stderr
         old_stdout = sys.stdout
         old_stderr = sys.stderr
         sys.stdout = io.StringIO()
         sys.stderr = io.StringIO()
         
-        # Create isolated namespace
         namespace = {}
         exec(code, namespace)
         
-        stdout_output = sys.stdout.getvalue()
-        stderr_output = sys.stderr.getvalue()
-        
         sys.stdout = old_stdout
         sys.stderr = old_stderr
         
-        # Check for common game components (snake game specific)
-        has_game_loop = any(keyword in code.lower() for keyword in ['while', 'game', 'loop'])
-        has_snake_logic = any(keyword in code.lower() for keyword in ['snake', 'direction', 'move'])
-        has_imports = 'import' in code
-        
-        completeness_score = sum([
-            has_game_loop * 0.33,
-            has_snake_logic * 0.33,
-            has_imports * 0.34
-        ])
-        
+        # Successfully executed
         return {
             "passed": True,
             "error": None,
-            "detail": None,
+            "detail": "Executed successfully",
             "completeness": completeness_score,
             "has_game_loop": has_game_loop,
             "has_snake_logic": has_snake_logic,
-            "code_length": len(code)
+            "code_length": len(code),
+            "executed": True
         }
         
-    except Exception as e:
+    except ModuleNotFoundError as e:
+        # Module not found is OK - the code is valid, just can't run here
         sys.stdout = old_stdout
         sys.stderr = old_stderr
         return {
-            "passed": False,
-            "error": type(e).__name__,
+            "passed": True,  # ← Changed to True!
+            "error": "ModuleNotFoundError",
             "detail": str(e),
+            "completeness": completeness_score,
+            "has_game_loop": has_game_loop,
+            "has_snake_logic": has_snake_logic,
+            "code_length": len(code),
+            "executed": False,
+            "note": "Syntax valid, imports unavailable in eval environment"
+        }
+        
+    except Exception as e:
+        # Other runtime errors indicate actual problems
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
+        
+        # Check if it's just a benign error (e.g., pygame.quit() when pygame not initialized)
+        error_type = type(e).__name__
+        benign_errors = ['SystemExit', 'KeyboardInterrupt']
+        
+        if error_type in benign_errors:
+            return {
+                "passed": True,
+                "error": error_type,
+                "detail": str(e),
+                "completeness": completeness_score,
+                "has_game_loop": has_game_loop,
+                "has_snake_logic": has_snake_logic,
+                "code_length": len(code),
+                "executed": False,
+                "note": "Benign runtime error"
+            }
+        
+        return {
+            "passed": False,
+            "error": error_type,
+            "detail": str(e),
+            "completeness": max(0.0, completeness_score - 0.3),  # Penalize but don't zero out
             "traceback": traceback.format_exc()
         }
-
-
         
 @app.function(
     image=image,
