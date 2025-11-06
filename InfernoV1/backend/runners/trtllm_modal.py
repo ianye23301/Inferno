@@ -237,18 +237,26 @@ def bench_b200(args=None):
 
     # Sampling params
     sampling_kwargs = dict(
-        temperature=temperature,
-        top_p=top_p,
-        max_tokens=max_new_tokens,
-        return_logits=return_logits,
+    temperature=temperature,
+    top_p=top_p,
+    max_tokens=max_new_tokens,
+    return_generation_logits=bool(extra.get("return_generation_logits", False)),
+    return_context_logits=bool(extra.get("return_context_logits", False)),
     )
     if top_k is not None:
         sampling_kwargs["top_k"] = top_k
-    if eos_token_id is not None:
-        sampling_kwargs["eos_token_id"] = int(eos_token_id)
+    # eos -> use end_id for TRT-LLM
+    if extra.get("eos_token_id") is not None:
+        sampling_kwargs["end_id"] = int(extra["eos_token_id"])
 
     sampling = SamplingParams(**sampling_kwargs)
-
+    if extra.get("lookahead_decode", 0):
+        try:
+            sampling.lookahead_config = tllme.LookaheadDecodingConfig(
+                num_lookahead_tokens=int(extra["lookahead_decode"])
+            )
+        except Exception:
+            pass
     # Optional: lookahead / recurrent drafting if the field exists
     # Some TRT-LLM builds accept lookahead via SamplingParams or via session/runtime config.
     for attr in ("lookahead_decode", "draft_tokens", "num_lookahead_tokens"):
