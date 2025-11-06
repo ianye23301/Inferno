@@ -42,16 +42,20 @@ class ModalDriver:
         logs_path = folder / "logs.txt"
         metrics_path = folder / "metrics.json"
 
+        # in ModalDriver.execute_locally_and_collect(...)
         if engine == "trtllm":
             payload = build_trtllm_payload(spec, config)
-            # Full module::function strings as values
+            tp = int(payload.get("tensor_parallel", 1))
             fn_by_pool_and_count = {
                 ("B200", 1): "backend.runners.trtllm_modal::bench_b200",
-                # Add more as you implement them:
-                # ("H200", 1): "backend.runners.trtllm_qwen_modal::bench_h200",
-                # ("H100", 1): "backend.runners.trtllm_qwen_modal::bench_h100",
-                # ("A100-80GB", 1): "backend.runners.trtllm_qwen_modal::bench_a100",
+                ("B200", 2): "backend.runners.trtllm_modal::bench_b200_tp2",
+                ("B200", 4): "backend.runners.trtllm_modal::bench_b200_tp4",
+                ("B200", 8): "backend.runners.trtllm_modal::bench_b200_tp8",
             }
+            # If user didn’t specify num_gpus, infer from TP
+            gpu_pool = spec.get("gpu_pool", "B200")
+            num_gpus = int(spec.get("num_gpus", tp))
+            fn = fn_by_pool_and_count.get((gpu_pool, num_gpus))
         else:
             payload = build_modal_payload(spec, config)
             fn_by_pool_and_count = {
