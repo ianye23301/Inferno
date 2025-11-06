@@ -276,8 +276,6 @@ def _bench_b200_impl(args=None):
         tensor_parallel_size=tp,
         dtype=llm_dtype,
         build_config=build_config,
-        skip_tokenizer_init=False,
-        enable_tqdm=False,
     )
 
     # Prompt(s)
