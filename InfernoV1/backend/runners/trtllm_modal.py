@@ -228,14 +228,10 @@ def _bench_b200_impl(args=None):
     kv_block_size           = extra.get("kv_block_size", None)
     sink_token_length       = extra.get("sink_token_length", None)
     
-    # Speculative decoding options
-    spec_mode = extra.get("speculative_mode", None)  # None, "draft_model", "lookahead", "medusa", "eagle"
-    draft_model_path = extra.get("draft_model", None)
-    num_draft_tokens = int(extra.get("num_draft_tokens", 5))
-    draft_model_tp = int(extra.get("draft_model_tp", 1))
-    
-    # Lookahead/NGram specific
-    lookahead_config = extra.get("lookahead_config", None)  # Dict with window_size, ngram_size, etc.
+    # NEW: NGram speculative decoding (correct way for TRT-LLM 1.0)
+    use_ngram = bool(extra.get("use_ngram_speculation", False))
+    ngram_draft_len = int(extra.get("ngram_draft_len", 5))
+    ngram_matching_size = int(extra.get("ngram_matching_size", 3))
 
     # KV cache budget
     max_tokens_budget = batch_size * (input_tokens + max_new_tokens + 128)
@@ -274,42 +270,25 @@ def _bench_b200_impl(args=None):
         except Exception:
             pass
 
-    # ===== SPECULATIVE DECODING SETUP =====
-    spec_decoding_config = None
-    
-    if spec_mode == "draft_model" and draft_model_path:
-        print(f"[INFO] Using Draft-Target-Model speculative decoding")
-        print(f"[INFO] Draft model: {draft_model_path}, draft tokens: {num_draft_tokens}")
-        
+    # ===== NGram SPECULATIVE DECODING SETUP =====
+    # This is the CORRECT way for TRT-LLM 1.0 - pass it as speculative_config
+    speculative_config = None
+    if use_ngram:
+        print(f"[INFO] Enabling NGram speculation: draft_len={ngram_draft_len}, matching_size={ngram_matching_size}")
         try:
-            from tensorrt_llm.llmapi import SpeculativeDecodingConfig
+            from tensorrt_llm.llmapi import NGramDecodingConfig
             
-            spec_decoding_config = SpeculativeDecodingConfig(
-                draft_model=draft_model_path,
-                num_draft_tokens=num_draft_tokens,
-                draft_tensor_parallel_size=draft_model_tp,
-                draft_dtype=llm_dtype,
+            speculative_config = NGramDecodingConfig(
+                max_draft_len=ngram_draft_len,
+                max_matching_ngram_size=ngram_matching_size,
+                is_keep_all=True,  # Keep all NGrams in pool
+                is_use_oldest=True,  # Use oldest match (more stable)
             )
         except Exception as e:
-            print(f"[WARN] Could not create SpeculativeDecodingConfig: {e}")
-    
-    elif spec_mode == "lookahead" and lookahead_config:
-        print(f"[INFO] Using Lookahead/NGram speculative decoding")
-        print(f"[INFO] Lookahead config: {lookahead_config}")
-        
-        try:
-            from tensorrt_llm.llmapi import LookaheadDecodingConfig
-            
-            # Lookahead config from TRT-LLM docs
-            spec_decoding_config = LookaheadDecodingConfig(
-                max_window_size=int(lookahead_config.get("max_window_size", 5)),
-                max_ngram_size=int(lookahead_config.get("max_ngram_size", 3)),
-                max_verification_set_size=int(lookahead_config.get("max_verification_set_size", 5)),
-            )
-        except Exception as e:
-            print(f"[WARN] Could not create LookaheadDecodingConfig: {e}")
+            print(f"[WARN] Could not create NGramDecodingConfig: {e}")
+            speculative_config = None
 
-    # Create LLM/engine
+    # Create LLM/engine with speculative_config
     print(f"[INFO] Initializing LLM with TP={tp}, dtype={llm_dtype}")
     
     llm_kwargs = {
@@ -319,17 +298,16 @@ def _bench_b200_impl(args=None):
         "build_config": build_config,
     }
     
-    # Add speculative decoding config if available
-    if spec_decoding_config is not None:
-        llm_kwargs["speculative_decoding_config"] = spec_decoding_config
+    # Add speculative_config if using NGram
+    if speculative_config is not None:
+        llm_kwargs["speculative_config"] = speculative_config
     
     llm = LLM(**llm_kwargs)
 
-    # Prompt(s)
+    # Rest of the code stays the same...
     prompt_text = args.get("prompt_text", "Build a snake game in Python.")
     prompts = [prompt_text] * batch_size
 
-    # Sampling params
     sampling_kwargs = dict(
         temperature=temperature,
         top_p=top_p,
@@ -385,7 +363,7 @@ def _bench_b200_impl(args=None):
     outputs = llm.generate(prompts, sampling, **generate_kwargs)
     t1 = time.perf_counter()
 
-    # Extract results
+    # Extract results (same as before)
     for idx, o in enumerate(outputs):
         request_data[idx]["start_time"] = t0
         request_data[idx]["end_time"] = t1
