@@ -192,9 +192,8 @@ def bench_b200_tp4(args=None):
 )
 def bench_b200_tp8(args=None):
     return _bench_b200_impl(args)
-
+    
 def _bench_b200_impl(args=None):
-    # TRT-LLM 1.0
     from tensorrt_llm import LLM, SamplingParams, BuildConfig
     try:
         from tensorrt_llm.llmapi import KvCacheConfig
@@ -228,7 +227,15 @@ def _bench_b200_impl(args=None):
     enable_block_reuse      = bool(extra.get("enable_block_reuse", True))
     kv_block_size           = extra.get("kv_block_size", None)
     sink_token_length       = extra.get("sink_token_length", None)
-    lookahead_decode        = extra.get("lookahead_decode", 0)
+    
+    # Speculative decoding options
+    spec_mode = extra.get("speculative_mode", None)  # None, "draft_model", "lookahead", "medusa", "eagle"
+    draft_model_path = extra.get("draft_model", None)
+    num_draft_tokens = int(extra.get("num_draft_tokens", 5))
+    draft_model_tp = int(extra.get("draft_model_tp", 1))
+    
+    # Lookahead/NGram specific
+    lookahead_config = extra.get("lookahead_config", None)  # Dict with window_size, ngram_size, etc.
 
     # KV cache budget
     max_tokens_budget = batch_size * (input_tokens + max_new_tokens + 128)
@@ -242,7 +249,7 @@ def _bench_b200_impl(args=None):
         os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", tok)
         os.environ.setdefault("HF_TOKEN", tok)
 
-    # ===== CRITICAL: Multi-GPU NCCL Setup =====
+    # Multi-GPU NCCL Setup
     if tp > 1:
         print(f"[INFO] Setting up multi-GPU environment for TP={tp}")
         os.environ["NCCL_DEBUG"] = "INFO"
@@ -251,8 +258,6 @@ def _bench_b200_impl(args=None):
         os.environ["NCCL_SOCKET_IFNAME"] = "eth0"
         os.environ["NCCL_TIMEOUT"] = "600"
         os.environ["NCCL_LAUNCH_MODE"] = "PARALLEL"
-        
-        # TRT-LLM orchestrator settings
         os.environ["TRTLLM_ORCHESTRATOR_ADDR"] = "127.0.0.1"
         os.environ["TRTLLM_ORCHESTRATOR_PORT"] = "29500"
 
@@ -269,14 +274,56 @@ def _bench_b200_impl(args=None):
         except Exception:
             pass
 
+    # ===== SPECULATIVE DECODING SETUP =====
+    spec_decoding_config = None
+    
+    if spec_mode == "draft_model" and draft_model_path:
+        print(f"[INFO] Using Draft-Target-Model speculative decoding")
+        print(f"[INFO] Draft model: {draft_model_path}, draft tokens: {num_draft_tokens}")
+        
+        try:
+            from tensorrt_llm.llmapi import SpeculativeDecodingConfig
+            
+            spec_decoding_config = SpeculativeDecodingConfig(
+                draft_model=draft_model_path,
+                num_draft_tokens=num_draft_tokens,
+                draft_tensor_parallel_size=draft_model_tp,
+                draft_dtype=llm_dtype,
+            )
+        except Exception as e:
+            print(f"[WARN] Could not create SpeculativeDecodingConfig: {e}")
+    
+    elif spec_mode == "lookahead" and lookahead_config:
+        print(f"[INFO] Using Lookahead/NGram speculative decoding")
+        print(f"[INFO] Lookahead config: {lookahead_config}")
+        
+        try:
+            from tensorrt_llm.llmapi import LookaheadDecodingConfig
+            
+            # Lookahead config from TRT-LLM docs
+            spec_decoding_config = LookaheadDecodingConfig(
+                max_window_size=int(lookahead_config.get("max_window_size", 5)),
+                max_ngram_size=int(lookahead_config.get("max_ngram_size", 3)),
+                max_verification_set_size=int(lookahead_config.get("max_verification_set_size", 5)),
+            )
+        except Exception as e:
+            print(f"[WARN] Could not create LookaheadDecodingConfig: {e}")
+
     # Create LLM/engine
     print(f"[INFO] Initializing LLM with TP={tp}, dtype={llm_dtype}")
-    llm = LLM(
-        model=model,
-        tensor_parallel_size=tp,
-        dtype=llm_dtype,
-        build_config=build_config,
-    )
+    
+    llm_kwargs = {
+        "model": model,
+        "tensor_parallel_size": tp,
+        "dtype": llm_dtype,
+        "build_config": build_config,
+    }
+    
+    # Add speculative decoding config if available
+    if spec_decoding_config is not None:
+        llm_kwargs["speculative_decoding_config"] = spec_decoding_config
+    
+    llm = LLM(**llm_kwargs)
 
     # Prompt(s)
     prompt_text = args.get("prompt_text", "Build a snake game in Python.")
@@ -296,15 +343,6 @@ def _bench_b200_impl(args=None):
         sampling_kwargs["end_id"] = int(extra["eos_token_id"])
 
     sampling = SamplingParams(**sampling_kwargs)
-    
-    # Optional lookahead
-    for attr in ("lookahead_decode", "draft_tokens", "num_lookahead_tokens"):
-        if hasattr(sampling, attr) and lookahead_decode:
-            try:
-                setattr(sampling, attr, int(lookahead_decode))
-                break
-            except Exception:
-                pass
 
     # KV cache configuration
     kv_cfg = None
@@ -443,6 +481,7 @@ def _bench_b200_impl(args=None):
             "top_p": top_p,
             "top_k": top_k,
             "extra": extra,
+            "speculative_mode": spec_mode,
         },
         "tokens_in_total": tokens_in_total,
         "tokens_out_total": total_output_tokens,
