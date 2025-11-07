@@ -371,44 +371,44 @@ def _bench_b200_impl(args=None):
     # KV cache config
     # --- replace your KV cache config block with this ---
 
-        kv_config = None
-        if KvCacheConfig is not None:
-            try:
-                kv_kwargs = {
-                    "enable_block_reuse": enable_block_reuse,
-                }
+    kv_config = None
+    if KvCacheConfig is not None:
+        try:
+            kv_kwargs = {
+                "enable_block_reuse": enable_block_reuse,
+            }
 
-                # Choose ONE KV budget knob:
-                # If user provides an explicit max_tokens, use it; otherwise use a GPU fraction (default 0.95).
-                user_max_tokens = extra.get("max_tokens", None)
-                if user_max_tokens is not None:
-                    kv_kwargs["max_tokens"] = int(user_max_tokens)
-                else:
-                    # Only set this if constructor supports it
-                    import inspect as _inspect
-                    _sig = _inspect.signature(KvCacheConfig)
-                    if "free_gpu_memory_fraction" in _sig.parameters:
-                        kv_kwargs["free_gpu_memory_fraction"] = float(extra.get("free_gpu_memory_fraction", 0.95))
+            # Choose ONE KV budget knob:
+            # If user provides an explicit max_tokens, use it; otherwise use a GPU fraction (default 0.95).
+            user_max_tokens = extra.get("max_tokens", None)
+            if user_max_tokens is not None:
+                kv_kwargs["max_tokens"] = int(user_max_tokens)
+            else:
+                # Only set this if constructor supports it
+                import inspect as _inspect
+                _sig = _inspect.signature(KvCacheConfig)
+                if "free_gpu_memory_fraction" in _sig.parameters:
+                    kv_kwargs["free_gpu_memory_fraction"] = float(extra.get("free_gpu_memory_fraction", 0.95))
 
-                # Sliding-window attention ONLY if explicitly requested
-                max_attention_window = extra.get("max_attention_window", None)
-                sink_token_length = extra.get("sink_token_length", None)
-                if max_attention_window is not None:
-                    kv_kwargs["max_attention_window"] = [int(max_attention_window)]
-                    # Enforce a positive sink length whenever SWA is enabled
-                    sink_val = int(sink_token_length) if sink_token_length is not None else 4
-                    kv_kwargs["sink_token_length"] = max(1, sink_val)
+            # Sliding-window attention ONLY if explicitly requested
+            max_attention_window = extra.get("max_attention_window", None)
+            sink_token_length = extra.get("sink_token_length", None)
+            if max_attention_window is not None:
+                kv_kwargs["max_attention_window"] = [int(max_attention_window)]
+                # Enforce a positive sink length whenever SWA is enabled
+                sink_val = int(sink_token_length) if sink_token_length is not None else 4
+                kv_kwargs["sink_token_length"] = max(1, sink_val)
 
-                # Optional flags if supported by this TRT-LLM version
-                import inspect
-                sig = inspect.signature(KvCacheConfig)
-                if "enable_partial_reuse" in sig.parameters:
-                    kv_kwargs["enable_partial_reuse"] = bool(extra.get("enable_partial_reuse", True))
+            # Optional flags if supported by this TRT-LLM version
+            import inspect
+            sig = inspect.signature(KvCacheConfig)
+            if "enable_partial_reuse" in sig.parameters:
+                kv_kwargs["enable_partial_reuse"] = bool(extra.get("enable_partial_reuse", True))
 
-                kv_config = KvCacheConfig(**kv_kwargs)
-            except Exception as e:
-                print(f"[WARN] Could not create KvCacheConfig: {e}")
-                kv_config = None
+            kv_config = KvCacheConfig(**kv_kwargs)
+        except Exception as e:
+            print(f"[WARN] Could not create KvCacheConfig: {e}")
+            kv_config = None
 
 
     # Create LLM
