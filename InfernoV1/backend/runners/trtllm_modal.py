@@ -534,8 +534,9 @@ def _bench_b200_impl(args=None):
         "trtllm_version": "latest",
         "config": {
             "dtype": dtype,
+            "quantization": quantization,
             "actual_dtype": llm_dtype,
-            "fp8_quantization": use_fp8,
+            "has_quantization": quant_config is not None,
             "tensor_parallel": tp,
             "max_seq_len": max_seq,
             "max_new_tokens": max_new_tokens,
