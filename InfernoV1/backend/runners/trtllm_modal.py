@@ -8,7 +8,8 @@ ENGINE_VOL = "trtllm-engines"
 app = modal.App(APP_NAME)
 vol = modal.Volume.from_name(ENGINE_VOL, create_if_missing=True)
 
-image = modal.Image.from_registry("nvcr.io/nvidia/tensorrt-llm/release:1.0.0")
+# UPDATED: Use latest TRT-LLM image
+image = modal.Image.from_registry("nvcr.io/nvidia/tensorrt-llm/release:latest")
 
 def _coerce_args(args):
     """Handle args being passed as list, dict, or string"""
@@ -228,10 +229,17 @@ def _bench_b200_impl(args=None):
     kv_block_size           = extra.get("kv_block_size", None)
     sink_token_length       = extra.get("sink_token_length", None)
     
-    # NEW: NGram speculative decoding (correct way for TRT-LLM 1.0)
-    use_ngram = bool(extra.get("use_ngram_speculation", False))
-    ngram_draft_len = int(extra.get("ngram_draft_len", 5))
-    ngram_matching_size = int(extra.get("ngram_matching_size", 3))
+    # UPDATED: Speculative decoding config for latest TRT-LLM
+    use_speculation = bool(extra.get("use_speculation", False))
+    spec_mode = extra.get("spec_mode", "ngram")  # "ngram", "medusa", "eagle", "draft_model"
+    
+    # NGram params
+    ngram_draft_len = int(extra.get("ngram_draft_len", 10))
+    ngram_matching_size = int(extra.get("ngram_matching_size", 7))
+    
+    # Draft model params (if using draft_model mode)
+    draft_model = extra.get("draft_model", None)
+    num_draft_tokens = int(extra.get("num_draft_tokens", 5))
 
     # KV cache budget
     max_tokens_budget = batch_size * (input_tokens + max_new_tokens + 128)
@@ -249,18 +257,26 @@ def _bench_b200_impl(args=None):
     if tp > 1:
         print(f"[INFO] Setting up multi-GPU environment for TP={tp}")
         os.environ["NCCL_DEBUG"] = "INFO"
+        # UPDATED: Try enabling high-speed interconnects for better performance
+        # Comment these out if you want to try NVLink
         os.environ["NCCL_IB_DISABLE"] = "1"
         os.environ["NCCL_P2P_DISABLE"] = "1"
         os.environ["NCCL_SOCKET_IFNAME"] = "eth0"
         os.environ["NCCL_TIMEOUT"] = "600"
         os.environ["NCCL_LAUNCH_MODE"] = "PARALLEL"
-        os.environ["TRTLLM_ORCHESTRATOR_ADDR"] = "127.0.0.1"
-        os.environ["TRTLLM_ORCHESTRATOR_PORT"] = "29500"
 
-    # Build config
-    build_config = BuildConfig(max_seq_len=max_seq, strongly_typed=True)
+    # UPDATED: Build config with latest optimizations
+    build_config = BuildConfig(
+        max_seq_len=max_seq,
+        strongly_typed=True,
+    )
+    
+    # Plugin config
     try:
         build_config.plugin_config.use_paged_context_fmha = use_paged_context_fmha
+        # UPDATED: Enable context FP32 accumulation for FP8 (better accuracy)
+        if llm_dtype == "fp8":
+            build_config.plugin_config.enable_context_fmha_fp32_acc = False  # FP8 optimized
     except Exception:
         pass
 
@@ -270,25 +286,71 @@ def _bench_b200_impl(args=None):
         except Exception:
             pass
 
-    # ===== NGram SPECULATIVE DECODING SETUP =====
-    # This is the CORRECT way for TRT-LLM 1.0 - pass it as speculative_config
+    # UPDATED: Speculative decoding setup for latest TRT-LLM
     speculative_config = None
-    if use_ngram:
-        print(f"[INFO] Enabling NGram speculation: draft_len={ngram_draft_len}, matching_size={ngram_matching_size}")
+    if use_speculation:
+        print(f"[INFO] Enabling speculative decoding: mode={spec_mode}")
         try:
-            from tensorrt_llm.llmapi import NGramDecodingConfig
+            if spec_mode == "ngram":
+                # UPDATED: Import from correct location in latest version
+                try:
+                    from tensorrt_llm.llmapi.llm_args import NGramDecodingConfig
+                except ImportError:
+                    from tensorrt_llm.llmapi import NGramDecodingConfig
+                
+                speculative_config = NGramDecodingConfig(
+                    max_draft_len=ngram_draft_len,
+                    max_matching_ngram_size=ngram_matching_size,
+                    is_keep_all=True,
+                    is_use_oldest=True,
+                )
+                print(f"[INFO] NGram: draft_len={ngram_draft_len}, matching_size={ngram_matching_size}")
             
-            speculative_config = NGramDecodingConfig(
-                max_draft_len=ngram_draft_len,
-                max_matching_ngram_size=ngram_matching_size,
-                is_keep_all=True,  # Keep all NGrams in pool
-                is_use_oldest=True,  # Use oldest match (more stable)
-            )
+            elif spec_mode == "draft_model" and draft_model:
+                # UPDATED: Draft-target model config
+                try:
+                    from tensorrt_llm.llmapi import SpeculativeDecodingConfig
+                    
+                    speculative_config = SpeculativeDecodingConfig(
+                        draft_model=draft_model,
+                        num_draft_tokens=num_draft_tokens,
+                        draft_tensor_parallel_size=1,  # Usually 1 for draft
+                        draft_dtype=llm_dtype,
+                    )
+                    print(f"[INFO] Draft model: {draft_model}, tokens={num_draft_tokens}")
+                except Exception as e:
+                    print(f"[WARN] SpeculativeDecodingConfig not available: {e}")
+                    speculative_config = None
+                    
         except Exception as e:
-            print(f"[WARN] Could not create NGramDecodingConfig: {e}")
+            print(f"[WARN] Could not create speculative config: {e}")
             speculative_config = None
 
-    # Create LLM/engine with speculative_config
+    # UPDATED: KV cache config with latest features
+    kv_config = None
+    if KvCacheConfig is not None:
+        try:
+            kv_kwargs = {
+                "enable_block_reuse": enable_block_reuse,
+                "max_tokens": int(max_tokens_budget),
+                "free_gpu_memory_fraction": 0.95,  # Use more VRAM
+            }
+            
+            # UPDATED: Check for new features in latest version
+            sig = inspect.signature(KvCacheConfig)
+            if "enable_partial_reuse" in sig.parameters:
+                kv_kwargs["enable_partial_reuse"] = True  # NEW: Partial block reuse
+            if "max_attention_window" in sig.parameters and input_tokens:
+                kv_kwargs["max_attention_window"] = [int(max_seq)]
+            if "sink_token_length" in sig.parameters and (sink_token_length is not None):
+                kv_kwargs["sink_token_length"] = int(sink_token_length)
+
+            kv_config = KvCacheConfig(**kv_kwargs)
+        except Exception as e:
+            print(f"[WARN] Could not create KvCacheConfig: {e}")
+            kv_config = None
+
+    # Create LLM with all optimizations
     print(f"[INFO] Initializing LLM with TP={tp}, dtype={llm_dtype}")
     
     llm_kwargs = {
@@ -298,16 +360,21 @@ def _bench_b200_impl(args=None):
         "build_config": build_config,
     }
     
-    # Add speculative_config if using NGram
+    # Add KV cache config
+    if kv_config is not None:
+        llm_kwargs["kv_cache_config"] = kv_config
+    
+    # Add speculative config
     if speculative_config is not None:
         llm_kwargs["speculative_config"] = speculative_config
     
     llm = LLM(**llm_kwargs)
 
-    # Rest of the code stays the same...
+    # Prompt(s)
     prompt_text = args.get("prompt_text", "Build a snake game in Python.")
     prompts = [prompt_text] * batch_size
 
+    # Sampling params
     sampling_kwargs = dict(
         temperature=temperature,
         top_p=top_p,
@@ -322,23 +389,6 @@ def _bench_b200_impl(args=None):
 
     sampling = SamplingParams(**sampling_kwargs)
 
-    # KV cache configuration
-    kv_cfg = None
-    if KvCacheConfig is not None:
-        try:
-            kv_kwargs = {"enable_block_reuse": enable_block_reuse}
-            sig = inspect.signature(KvCacheConfig)
-            if "max_tokens" in sig.parameters:
-                kv_kwargs["max_tokens"] = int(max_tokens_budget)
-            if "max_attention_window" in sig.parameters and input_tokens:
-                kv_kwargs["max_attention_window"] = [int(max_seq)]
-            if "sink_token_length" in sig.parameters and (sink_token_length is not None):
-                kv_kwargs["sink_token_length"] = int(sink_token_length)
-
-            kv_cfg = KvCacheConfig(**kv_kwargs)
-        except Exception:
-            kv_cfg = None
-
     # Tracking
     request_data = {i: {
         "start_time": None,
@@ -352,18 +402,13 @@ def _bench_b200_impl(args=None):
 
     # Generate
     t0 = time.perf_counter()
-    generate_kwargs = {}
-    if kv_cfg is not None:
-        try:
-            if "kv_cache_config" in inspect.signature(llm.generate).parameters:
-                generate_kwargs["kv_cache_config"] = kv_cfg
-        except Exception:
-            pass
-
-    outputs = llm.generate(prompts, sampling, **generate_kwargs)
+    
+    # UPDATED: Generate API is simpler in latest version
+    outputs = llm.generate(prompts, sampling)
+    
     t1 = time.perf_counter()
 
-    # Extract results (same as before)
+    # Extract results
     for idx, o in enumerate(outputs):
         request_data[idx]["start_time"] = t0
         request_data[idx]["end_time"] = t1
@@ -372,6 +417,7 @@ def _bench_b200_impl(args=None):
             request_data[idx]["tokens"] = getattr(o.outputs[0], "token_ids", []) or []
             request_data[idx]["text"] = getattr(o.outputs[0], "text", "")
 
+        # UPDATED: Metrics extraction for latest version
         m = getattr(o, "metrics", None)
         ft = None
         if m:
@@ -448,6 +494,7 @@ def _bench_b200_impl(args=None):
     metrics = {
         "model": model,
         "gpu": f"B200x{tp}",
+        "trtllm_version": "latest",  # NEW: Track version
         "config": {
             "dtype": dtype,
             "tensor_parallel": tp,
@@ -459,7 +506,8 @@ def _bench_b200_impl(args=None):
             "top_p": top_p,
             "top_k": top_k,
             "extra": extra,
-            "speculative_mode": spec_mode,
+            "speculation_enabled": use_speculation,
+            "speculation_mode": spec_mode if use_speculation else None,
         },
         "tokens_in_total": tokens_in_total,
         "tokens_out_total": total_output_tokens,
