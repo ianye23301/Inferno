@@ -369,22 +369,36 @@ def _bench_b200_impl(args=None):
             speculative_config = None
 
     # KV cache config
+    # --- replace your KV cache config block with this ---
+# KV cache config
     kv_config = None
     if KvCacheConfig is not None:
         try:
             kv_kwargs = {
                 "enable_block_reuse": enable_block_reuse,
                 "max_tokens": int(max_tokens_budget),
-                "free_gpu_memory_fraction": 0.95,
             }
-            
+
+            # Optional knobs from extra
+            max_attention_window = extra.get("max_attention_window", None)
+            sink_token_length = extra.get("sink_token_length", None)
+
+            # Only set max_attention_window if user asked for it
+            if max_attention_window is not None:
+                kv_kwargs["max_attention_window"] = [int(max_attention_window)]
+                # Enforce a positive sink; default to 4 if user omitted or passed 0
+                sink_val = int(sink_token_length) if sink_token_length is not None else 4
+                if sink_val <= 0:
+                    sink_val = 4
+                kv_kwargs["sink_token_length"] = sink_val
+
+            # Add optional fields only if KvCacheConfig supports them
+            import inspect
             sig = inspect.signature(KvCacheConfig)
+            if "free_gpu_memory_fraction" in sig.parameters:
+                kv_kwargs["free_gpu_memory_fraction"] = float(extra.get("free_gpu_memory_fraction", 0.95))
             if "enable_partial_reuse" in sig.parameters:
-                kv_kwargs["enable_partial_reuse"] = True
-            if "max_attention_window" in sig.parameters and input_tokens:
-                kv_kwargs["max_attention_window"] = [int(max_seq)]
-            if "sink_token_length" in sig.parameters and (sink_token_length is not None):
-                kv_kwargs["sink_token_length"] = int(sink_token_length)
+                kv_kwargs["enable_partial_reuse"] = bool(extra.get("enable_partial_reuse", True))
 
             kv_config = KvCacheConfig(**kv_kwargs)
         except Exception as e:
