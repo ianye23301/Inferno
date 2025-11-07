@@ -209,6 +209,7 @@ def _bench_b200_impl(args=None):
     # Core knobs
     model = args.get("model", "Qwen/Qwen2.5-Coder-14B")
     dtype = str(args.get("dtype", "float16"))
+    quantization = str(args.get("quantization", "none"))
     tp = int(args.get("tensor_parallel", 1))
     max_seq = int(args.get("max_seq_len", 4096))
     max_new_tokens = int(args.get("max_new_tokens", 512))
@@ -229,23 +230,71 @@ def _bench_b200_impl(args=None):
     kv_block_size           = extra.get("kv_block_size", None)
     sink_token_length       = extra.get("sink_token_length", None)
     
-    # UPDATED: Speculative decoding config for latest TRT-LLM
+    # Speculative decoding config
     use_speculation = bool(extra.get("use_speculation", False))
-    spec_mode = extra.get("spec_mode", "ngram")  # "ngram", "medusa", "eagle", "draft_model"
-    
-    # NGram params
+    spec_mode = extra.get("spec_mode", "ngram")
     ngram_draft_len = int(extra.get("ngram_draft_len", 10))
     ngram_matching_size = int(extra.get("ngram_matching_size", 7))
-    
-    # Draft model params (if using draft_model mode)
     draft_model = extra.get("draft_model", None)
     num_draft_tokens = int(extra.get("num_draft_tokens", 5))
 
     # KV cache budget
     max_tokens_budget = batch_size * (input_tokens + max_new_tokens + 128)
 
-    # DType normalization
-    llm_dtype = "fp8" if dtype.lower() == "fp8" else dtype
+    # UPDATED: Parse quantization configuration
+    quantization_lower = quantization.lower()
+    
+    # Determine base dtype
+    dtype_map = {
+        "fp16": "float16",
+        "float16": "float16",
+        "bf16": "bfloat16",
+        "bfloat16": "bfloat16",
+        "fp32": "float32",
+        "float32": "float32",
+    }
+    llm_dtype = dtype_map.get(dtype.lower(), "float16")
+    
+    # Parse quantization type
+    quant_config = None
+    if quantization_lower not in ["none", "null", "", "auto"]:
+        print(f"[INFO] Enabling quantization: {quantization}")
+        try:
+            from tensorrt_llm.models.modeling_utils import QuantConfig, QuantAlgo
+            
+            quant_algo_map = {
+                "fp8": QuantAlgo.FP8,
+                "float8": QuantAlgo.FP8,
+                "fp4": QuantAlgo.FP4,  # Assuming this exists
+                "int8": QuantAlgo.W8A16,
+                "int4": QuantAlgo.W4A16,
+                "int4_awq": QuantAlgo.W4A16_AWQ,
+                "int4_gptq": QuantAlgo.W4A16_GPTQ,
+                "w8a8": QuantAlgo.W8A8_SQ_PER_CHANNEL,
+                "smoothquant": QuantAlgo.W8A8_SQ_PER_CHANNEL,
+            }
+            
+            quant_algo = quant_algo_map.get(quantization_lower)
+            if quant_algo:
+                # Build QuantConfig with appropriate settings
+                quant_kwargs = {"quant_algo": quant_algo}
+                
+                # Add algorithm-specific parameters from extra
+                if quantization_lower in ["int4_awq", "int4_gptq", "int4"]:
+                    quant_kwargs["group_size"] = extra.get("group_size", 128)
+                    quant_kwargs["has_zero_point"] = extra.get("has_zero_point", False)
+                
+                if quantization_lower in ["w8a8", "smoothquant"]:
+                    quant_kwargs["smoothquant_val"] = extra.get("smoothquant_val", 0.5)
+                
+                quant_config = QuantConfig(**quant_kwargs)
+                print(f"[INFO] Created QuantConfig: {quant_algo}")
+            else:
+                print(f"[WARN] Unknown quantization type: {quantization}, ignoring")
+                
+        except Exception as e:
+            print(f"[WARN] Could not create QuantConfig: {e}")
+            quant_config = None
 
     # Auth
     tok = os.environ.get("HUGGINGFACE_HUB_TOKEN") or os.environ.get("HF_TOKEN")
@@ -257,15 +306,13 @@ def _bench_b200_impl(args=None):
     if tp > 1:
         print(f"[INFO] Setting up multi-GPU environment for TP={tp}")
         os.environ["NCCL_DEBUG"] = "INFO"
-        # UPDATED: Try enabling high-speed interconnects for better performance
-        # Comment these out if you want to try NVLink
         os.environ["NCCL_IB_DISABLE"] = "1"
         os.environ["NCCL_P2P_DISABLE"] = "1"
         os.environ["NCCL_SOCKET_IFNAME"] = "eth0"
         os.environ["NCCL_TIMEOUT"] = "600"
         os.environ["NCCL_LAUNCH_MODE"] = "PARALLEL"
 
-    # UPDATED: Build config with latest optimizations
+    # Build config
     build_config = BuildConfig(
         max_seq_len=max_seq,
         strongly_typed=True,
@@ -274,9 +321,6 @@ def _bench_b200_impl(args=None):
     # Plugin config
     try:
         build_config.plugin_config.use_paged_context_fmha = use_paged_context_fmha
-        # UPDATED: Enable context FP32 accumulation for FP8 (better accuracy)
-        if llm_dtype == "fp8":
-            build_config.plugin_config.enable_context_fmha_fp32_acc = False  # FP8 optimized
     except Exception:
         pass
 
@@ -286,13 +330,12 @@ def _bench_b200_impl(args=None):
         except Exception:
             pass
 
-    # UPDATED: Speculative decoding setup for latest TRT-LLM
+    # Speculative decoding setup
     speculative_config = None
     if use_speculation:
         print(f"[INFO] Enabling speculative decoding: mode={spec_mode}")
         try:
             if spec_mode == "ngram":
-                # UPDATED: Import from correct location in latest version
                 try:
                     from tensorrt_llm.llmapi.llm_args import NGramDecodingConfig
                 except ImportError:
@@ -307,14 +350,13 @@ def _bench_b200_impl(args=None):
                 print(f"[INFO] NGram: draft_len={ngram_draft_len}, matching_size={ngram_matching_size}")
             
             elif spec_mode == "draft_model" and draft_model:
-                # UPDATED: Draft-target model config
                 try:
                     from tensorrt_llm.llmapi import SpeculativeDecodingConfig
                     
                     speculative_config = SpeculativeDecodingConfig(
                         draft_model=draft_model,
                         num_draft_tokens=num_draft_tokens,
-                        draft_tensor_parallel_size=1,  # Usually 1 for draft
+                        draft_tensor_parallel_size=1,
                         draft_dtype=llm_dtype,
                     )
                     print(f"[INFO] Draft model: {draft_model}, tokens={num_draft_tokens}")
@@ -326,20 +368,19 @@ def _bench_b200_impl(args=None):
             print(f"[WARN] Could not create speculative config: {e}")
             speculative_config = None
 
-    # UPDATED: KV cache config with latest features
+    # KV cache config
     kv_config = None
     if KvCacheConfig is not None:
         try:
             kv_kwargs = {
                 "enable_block_reuse": enable_block_reuse,
                 "max_tokens": int(max_tokens_budget),
-                "free_gpu_memory_fraction": 0.95,  # Use more VRAM
+                "free_gpu_memory_fraction": 0.95,
             }
             
-            # UPDATED: Check for new features in latest version
             sig = inspect.signature(KvCacheConfig)
             if "enable_partial_reuse" in sig.parameters:
-                kv_kwargs["enable_partial_reuse"] = True  # NEW: Partial block reuse
+                kv_kwargs["enable_partial_reuse"] = True
             if "max_attention_window" in sig.parameters and input_tokens:
                 kv_kwargs["max_attention_window"] = [int(max_seq)]
             if "sink_token_length" in sig.parameters and (sink_token_length is not None):
@@ -350,8 +391,8 @@ def _bench_b200_impl(args=None):
             print(f"[WARN] Could not create KvCacheConfig: {e}")
             kv_config = None
 
-    # Create LLM with all optimizations
-    print(f"[INFO] Initializing LLM with TP={tp}, dtype={llm_dtype}")
+    # Create LLM
+    print(f"[INFO] Initializing LLM: TP={tp}, dtype={llm_dtype}, quantization={quantization}")
     
     llm_kwargs = {
         "model": model,
@@ -359,6 +400,10 @@ def _bench_b200_impl(args=None):
         "dtype": llm_dtype,
         "build_config": build_config,
     }
+    
+    # Add quant_config if quantization requested
+    if quant_config is not None:
+        llm_kwargs["quant_config"] = quant_config
     
     # Add KV cache config
     if kv_config is not None:
@@ -368,13 +413,13 @@ def _bench_b200_impl(args=None):
     if speculative_config is not None:
         llm_kwargs["speculative_config"] = speculative_config
     
+    
     llm = LLM(**llm_kwargs)
 
-    # Prompt(s)
+    # Rest stays the same...
     prompt_text = args.get("prompt_text", "Build a snake game in Python.")
     prompts = [prompt_text] * batch_size
 
-    # Sampling params
     sampling_kwargs = dict(
         temperature=temperature,
         top_p=top_p,
@@ -389,7 +434,6 @@ def _bench_b200_impl(args=None):
 
     sampling = SamplingParams(**sampling_kwargs)
 
-    # Tracking
     request_data = {i: {
         "start_time": None,
         "first_token_time": None,
@@ -400,15 +444,10 @@ def _bench_b200_impl(args=None):
 
     total_start = time.perf_counter()
 
-    # Generate
     t0 = time.perf_counter()
-    
-    # UPDATED: Generate API is simpler in latest version
     outputs = llm.generate(prompts, sampling)
-    
     t1 = time.perf_counter()
 
-    # Extract results
     for idx, o in enumerate(outputs):
         request_data[idx]["start_time"] = t0
         request_data[idx]["end_time"] = t1
@@ -417,7 +456,6 @@ def _bench_b200_impl(args=None):
             request_data[idx]["tokens"] = getattr(o.outputs[0], "token_ids", []) or []
             request_data[idx]["text"] = getattr(o.outputs[0], "text", "")
 
-        # UPDATED: Metrics extraction for latest version
         m = getattr(o, "metrics", None)
         ft = None
         if m:
@@ -436,7 +474,7 @@ def _bench_b200_impl(args=None):
     total_end = time.perf_counter()
     wall_time = total_end - total_start
 
-    # Aggregate metrics
+    # [Metrics calculation - same as before]
     ttft_values, tpot_values = [], []
     total_output_tokens = 0
 
@@ -478,7 +516,6 @@ def _bench_b200_impl(args=None):
     decode_tok_s  = (total_output_tokens / decode_time_total_s) if decode_time_total_s > 0 else 0.0
     overall_tok_s = (tokens_in_total + total_output_tokens) / max(1e-6, wall_time)
 
-    # Quick eval
     generated_texts = [d["text"] for d in request_data.values() if d["text"]]
     eval_results = []
     if generated_texts:
@@ -494,9 +531,11 @@ def _bench_b200_impl(args=None):
     metrics = {
         "model": model,
         "gpu": f"B200x{tp}",
-        "trtllm_version": "latest",  # NEW: Track version
+        "trtllm_version": "latest",
         "config": {
             "dtype": dtype,
+            "actual_dtype": llm_dtype,
+            "fp8_quantization": use_fp8,
             "tensor_parallel": tp,
             "max_seq_len": max_seq,
             "max_new_tokens": max_new_tokens,
